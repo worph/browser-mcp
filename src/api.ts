@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
+import fs from "fs";
 import path from "path";
 import { z } from "zod";
 import { getConfig, updateConfig } from "./config";
@@ -11,14 +12,14 @@ export function createApp(
 ): express.Application {
   const app = express();
 
+  // Auth is handled by the hash-lock sidecar — app trusts the network
+  const webDir = path.join(__dirname, "..", "web");
+  app.use(express.static(webDir));
+
   // Mount MCP router BEFORE express.json() — it handles its own body parsing
   app.use("/mcp", mcpServer.createRouter());
 
   app.use(express.json());
-
-  // Serve static web UI
-  const webDir = path.join(__dirname, "..", "web");
-  app.use(express.static(webDir));
 
   // ── Status & Info ──────────────────────────────────────────────────────
 
@@ -113,6 +114,15 @@ export function createApp(
       res.send(buffer);
     } catch (err) {
       res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.get("/api/vnc-password", (_req: Request, res: Response) => {
+    try {
+      const password = fs.readFileSync("/tmp/.vnc_password", "utf-8").trim();
+      res.json({ password });
+    } catch {
+      res.json({ password: "" });
     }
   });
 

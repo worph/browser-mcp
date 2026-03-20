@@ -2,6 +2,7 @@ import { loadConfig } from "./config";
 import { createApp } from "./api";
 import { MCPServer } from "./mcp-server";
 import { BrowserClient } from "./browser-client";
+import { createDiscoveryResponder } from "./mcp-announce";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -16,6 +17,15 @@ async function main(): Promise<void> {
     console.log(`browser-mcp listening on http://localhost:${port}`);
     console.log(`Web UI: http://localhost:${port}`);
     console.log(`MCP endpoint: http://localhost:${port}/mcp`);
+
+    // Beacon discovery
+    createDiscoveryResponder({
+      name: "browser-mcp",
+      description: "Headless browser automation — navigate, click, type, screenshot, and more via Playwright",
+      tools: mcpServer.getToolDefinitions(),
+      port: config.port,
+      listenPort: parseInt(process.env.DISCOVERY_PORT || "9099"),
+    });
   });
 
   // Auto-launch browser in background

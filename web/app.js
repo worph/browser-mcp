@@ -1,3 +1,5 @@
+// Auth is handled by the hash-lock sidecar — no client-side hash needed
+
 // Status polling
 async function loadStatus() {
   try {
@@ -145,10 +147,34 @@ async function loadMcpInfo() {
 }
 
 // noVNC embed with auto-scaling
-function initVnc() {
+async function initVnc() {
   const vncFrame = document.getElementById("vnc-frame");
   const vncHost = window.location.hostname;
-  vncFrame.src = `http://${vncHost}:6080/vnc.html?resize=scale&scaleViewport=true&autoconnect=true&reconnect=true&reconnect_delay=1000`;
+  let password = "";
+  try {
+    const res = await fetch("/api/vnc-password");
+    const data = await res.json();
+    password = data.password || "";
+  } catch {
+    // ignore — will connect without password
+  }
+  vncFrame.src = `http://${vncHost}:6080/vnc.html?resize=scale&scaleViewport=true&autoconnect=true&reconnect=true&reconnect_delay=1000&password=${encodeURIComponent(password)}`;
+
+  // Hide the noVNC control bar once the iframe loads
+  vncFrame.addEventListener("load", () => {
+    try {
+      const iframeDoc = vncFrame.contentDocument || vncFrame.contentWindow.document;
+      const style = iframeDoc.createElement("style");
+      style.textContent = `
+        #noVNC_control_bar, #noVNC_control_bar_anchor,
+        #noVNC_control_bar_handle, #noVNC_transition,
+        .noVNC_corner { display: none !important; }
+      `;
+      iframeDoc.head.appendChild(style);
+    } catch (e) {
+      // Cross-origin — can't inject styles
+    }
+  });
 }
 
 // Drawer toggle

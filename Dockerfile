@@ -63,9 +63,13 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # Install Playwright Chromium with dependencies
 RUN npx playwright-core install --with-deps chromium
 
+# Patch noVNC: hide status bar and fix scrollbar overflow
+RUN sed -i 's|<div id="noVNC_status_bar">|<div id="noVNC_status_bar" style="display:none">|' /usr/share/novnc/vnc_lite.html \
+    && sed -i 's|</head>|<style>html,body{margin:0;padding:0;overflow:hidden;width:100%;height:100%}</style></head>|' /usr/share/novnc/vnc_lite.html
+
 EXPOSE 9746 6080
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:9746/api/status || exit 1
+    CMD curl -sf -o /dev/null -w '%{http_code}' http://localhost:9746/api/status | grep -qE '200|403' || exit 1
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

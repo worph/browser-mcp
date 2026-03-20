@@ -8,10 +8,15 @@ services:
     shm_size: "2gb"
     environment:
       - VNC_RESOLUTION=1280x720x24
+      - DISCOVERY_PORT=9099
+      - MCP_PORT=9746
     restart: unless-stopped
     networks:
       - mcp-network
+      - mcp-net
 
 networks:
   mcp-network:
+    external: true
+  mcp-net:
     external: true
