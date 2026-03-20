@@ -1,0 +1,8 @@
+node_modules
+dist
+config.json
+*.log
+.env*
+pnpm-debug.log*
+.claude/settings.local.json
+CLAUDE.md

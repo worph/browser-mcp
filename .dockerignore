@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+config.json
+*.md
+.env*
+pnpm-debug.log*

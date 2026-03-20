@@ -1,0 +1,15 @@
+{
+  "port": 9746,
+  "hostname": "browsermcp",
+  "browser": {
+    "defaultUrl": "about:blank",
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "autoLaunch": true
+  },
+  "vnc": {
+    "resolution": "1280x720x24"
+  }
+}

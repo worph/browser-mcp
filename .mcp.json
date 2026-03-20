@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "browser-mcp": {
+      "type": "http",
+      "url": "http://localhost:9746/mcp"
+    }
+  }
+}

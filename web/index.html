@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser MCP</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4e8; }
+
+    /* VNC takes full viewport */
+    #vnc-frame { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; background: #000; }
+
+    /* Top-left status bar */
+    .topbar { position: fixed; top: 12px; left: 12px; z-index: 100; display: flex; gap: 8px; align-items: center; }
+    .topbar-title { font-size: 1rem; font-weight: 600; color: #58a6ff; background: rgba(15,17,23,0.85); padding: 6px 12px; border-radius: 8px; backdrop-filter: blur(8px); }
+    .status-pill { font-size: 0.75rem; padding: 4px 10px; border-radius: 10px; font-weight: 500; background: rgba(15,17,23,0.85); backdrop-filter: blur(8px); }
+    .pill-green { color: #2dd4bf; }
+    .pill-yellow { color: #f59e0b; }
+    .pill-red { color: #f87171; }
+
+    /* Toggle button */
+    .drawer-toggle { position: fixed; top: 12px; right: 12px; z-index: 200; width: 40px; height: 40px; border: 1px solid #30363d; border-radius: 8px; background: rgba(22,27,34,0.9); backdrop-filter: blur(8px); color: #c9d1d9; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+    .drawer-toggle:hover { background: rgba(48,54,61,0.9); }
+
+    /* Dropdown panel */
+    .drawer { position: fixed; top: 56px; right: 12px; width: 400px; max-height: calc(100vh - 70px); z-index: 150; background: rgba(22,27,34,0.95); backdrop-filter: blur(12px); border: 1px solid #30363d; border-radius: 8px; padding: 16px; overflow-y: auto; transition: opacity 0.15s ease, transform 0.15s ease; opacity: 0; transform: translateY(-8px); pointer-events: none; }
+    .drawer.open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+
+    .card { background: rgba(13,17,23,0.6); border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .card h2 { font-size: 0.95rem; margin-bottom: 8px; color: #c9d1d9; }
+    .status-row { display: flex; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; font-size: 0.85rem; }
+    .status-badge { padding: 3px 10px; border-radius: 10px; font-size: 0.8rem; font-weight: 500; }
+    .badge-green { background: #1b4332; color: #2dd4bf; }
+    .badge-yellow { background: #3b2f00; color: #f59e0b; }
+    .badge-red { background: #3b1010; color: #f87171; }
+    .form-group { margin-bottom: 10px; }
+    .form-group label { display: block; font-size: 0.8rem; color: #8b949e; margin-bottom: 3px; }
+    .form-group input { width: 100%; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e1e4e8; font-size: 0.85rem; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btn { padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 500; }
+    .btn-primary { background: #238636; color: #fff; }
+    .btn-primary:hover { background: #2ea043; }
+    .btn-danger { background: #da3633; color: #fff; }
+    .btn-danger:hover { background: #f85149; }
+    .btn-secondary { background: #30363d; color: #c9d1d9; }
+    .btn-secondary:hover { background: #484f58; }
+    .btn-group { display: flex; gap: 6px; margin-top: 10px; }
+    .info-text { font-size: 0.8rem; color: #8b949e; }
+    .url-info { font-size: 0.8rem; color: #8b949e; margin-top: 4px; word-break: break-all; }
+    pre { background: #0d1117; padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 0.75rem; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <!-- VNC fullscreen -->
+  <iframe id="vnc-frame" src="" allow="clipboard-read; clipboard-write"></iframe>
+
+  <!-- Floating top bar -->
+  <div class="topbar">
+    <span class="topbar-title">Browser MCP</span>
+    <span id="browser-pill" class="status-pill pill-yellow">Browser: ...</span>
+  </div>
+
+  <!-- Drawer toggle -->
+  <button class="drawer-toggle" onclick="toggleDrawer()" title="Settings">&#9776;</button>
+
+  <!-- Collapsible drawer -->
+  <div id="drawer" class="drawer">
+    <!-- Status Card -->
+    <div class="card">
+      <h2>Status</h2>
+      <div class="status-row">
+        <span>Browser: <span id="browser-status" class="status-badge badge-yellow">checking...</span></span>
+      </div>
+      <div id="page-url" class="url-info"></div>
+      <div id="page-title" class="info-text" style="margin-top: 2px;"></div>
+    </div>
+
+    <!-- Actions Card -->
+    <div class="card">
+      <h2>Actions</h2>
+      <div class="form-group">
+        <label>Navigate to URL</label>
+        <input type="text" id="nav-url" placeholder="https://example.com">
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="navigateTo()">Navigate</button>
+        <button class="btn btn-secondary" onclick="takeScreenshot()">Screenshot</button>
+        <button class="btn btn-secondary" onclick="reloadPage()">Reload</button>
+      </div>
+    </div>
+
+    <!-- Config Card -->
+    <div class="card">
+      <h2>Configuration</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Default URL</label>
+          <input type="text" id="cfg-default-url">
+        </div>
+        <div class="form-group">
+          <label>Server Port</label>
+          <input type="number" id="cfg-port">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Viewport Width</label>
+          <input type="number" id="cfg-vp-width">
+        </div>
+        <div class="form-group">
+          <label>Viewport Height</label>
+          <input type="number" id="cfg-vp-height">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>VNC Resolution</label>
+        <input type="text" id="cfg-vnc-res">
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
+      </div>
+    </div>
+
+    <!-- MCP Info Card -->
+    <div class="card">
+      <h2>MCP Server Info</h2>
+      <div id="mcp-info">
+        <p class="info-text">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

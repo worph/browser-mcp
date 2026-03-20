@@ -1,0 +1,17 @@
+services:
+  browser-mcp:
+    build: .
+    container_name: browser-mcp
+    ports:
+      - "9746:9746"
+      - "6080:6080"
+    shm_size: "2gb"
+    environment:
+      - VNC_RESOLUTION=1280x720x24
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    external: true
