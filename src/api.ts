@@ -1,7 +1,9 @@
 import express, { Request, Response, NextFunction } from "express";
 import fs from "fs";
 import path from "path";
+import http from "http";
 import { z } from "zod";
+import { createProxyMiddleware } from "http-proxy-middleware";
 import { getConfig, updateConfig } from "./config";
 import { MCPServer } from "./mcp-server";
 import { BrowserClient } from "./browser-client";
@@ -9,12 +11,24 @@ import { BrowserClient } from "./browser-client";
 export function createApp(
   mcpServer: MCPServer,
   browserClient: BrowserClient
-): express.Application {
+): { app: express.Application; attachWebSocket: (server: http.Server) => void } {
   const app = express();
 
   // Auth is handled by the hash-lock sidecar — app trusts the network
   const webDir = path.join(__dirname, "..", "web");
   app.use(express.static(webDir));
+
+  // ── noVNC: proxy WebSocket to internal websockify ───────────────────────
+  const vncProxy = createProxyMiddleware({
+    target: "http://127.0.0.1:6080",
+    ws: true,
+    changeOrigin: true,
+    pathRewrite: { "^/vnc/websockify": "/" },
+  });
+  app.use("/vnc/websockify", vncProxy);
+
+  // Serve noVNC static files
+  app.use("/vnc", express.static("/usr/share/novnc"));
 
   // Mount MCP router BEFORE express.json() — it handles its own body parsing
   app.use("/mcp", mcpServer.createRouter());
@@ -198,7 +212,7 @@ export function createApp(
 
   // Fallback: serve index.html for any non-API route
   app.get("*", (req: Request, res: Response) => {
-    if (!req.path.startsWith("/api")) {
+    if (!req.path.startsWith("/api") && !req.path.startsWith("/vnc")) {
       res.sendFile(path.join(webDir, "index.html"));
     } else {
       res.status(404).json({ error: "Not found" });
@@ -212,5 +226,14 @@ export function createApp(
     res.status(500).json({ error: err.message });
   });
 
-  return app;
+  // Attach WebSocket upgrade handler to the HTTP server
+  function attachWebSocket(server: http.Server): void {
+    server.on("upgrade", (req, socket, head) => {
+      if (req.url?.startsWith("/vnc/websockify")) {
+        (vncProxy as any).upgrade(req, socket, head);
+      }
+    });
+  }
+
+  return { app, attachWebSocket };
 }

@@ -10,13 +10,14 @@ async function main(): Promise<void> {
   const browserClient = new BrowserClient();
   const mcpServer = new MCPServer(browserClient);
 
-  const app = createApp(mcpServer, browserClient);
+  const { app, attachWebSocket } = createApp(mcpServer, browserClient);
   const port = config.port;
 
   const server = app.listen(port, () => {
     console.log(`browser-mcp listening on http://localhost:${port}`);
     console.log(`Web UI: http://localhost:${port}`);
     console.log(`MCP endpoint: http://localhost:${port}/mcp`);
+    console.log(`noVNC: http://localhost:${port}/vnc/vnc_lite.html`);
 
     // Beacon discovery
     createDiscoveryResponder({
@@ -27,6 +28,9 @@ async function main(): Promise<void> {
       listenPort: parseInt(process.env.DISCOVERY_PORT || "9099"),
     });
   });
+
+  // Wire WebSocket upgrade for noVNC proxy
+  attachWebSocket(server);
 
   // Auto-launch browser in background
   if (config.browser.autoLaunch) {

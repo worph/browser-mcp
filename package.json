@@ -11,11 +11,18 @@
     "clean": "rm -rf dist",
     "lint": "eslint src/"
   },
-  "keywords": ["mcp", "browser", "chromium", "playwright", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "browser",
+    "chromium",
+    "playwright",
+    "model-context-protocol"
+  ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "express": "^4.18.2",
+    "http-proxy-middleware": "^3.0.5",
     "playwright-core": "^1.48.0",
     "zod": "^3.22.4"
   },

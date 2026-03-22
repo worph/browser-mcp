@@ -149,7 +149,6 @@ async function loadMcpInfo() {
 // noVNC embed with auto-scaling
 async function initVnc() {
   const vncFrame = document.getElementById("vnc-frame");
-  const vncHost = window.location.hostname;
   let password = "";
   try {
     const res = await fetch("/api/vnc-password");
@@ -158,7 +157,7 @@ async function initVnc() {
   } catch {
     // ignore — will connect without password
   }
-  vncFrame.src = `http://${vncHost}:6080/vnc.html?resize=scale&scaleViewport=true&autoconnect=true&reconnect=true&reconnect_delay=1000&password=${encodeURIComponent(password)}`;
+  vncFrame.src = `/vnc/vnc_lite.html?path=vnc/websockify&scale=true&resize=true&autoconnect=true&reconnect=true&reconnect_delay=1000&password=${encodeURIComponent(password)}`;
 
   // Hide the noVNC control bar once the iframe loads
   vncFrame.addEventListener("load", () => {
