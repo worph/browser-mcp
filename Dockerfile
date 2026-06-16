@@ -55,8 +55,9 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 
-# Copy web UI and config
+# Copy web UI, config, and the shared-Chrome launcher
 COPY web/ ./web/
+COPY scripts/ ./scripts/
 COPY config.example.json ./config.json
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 

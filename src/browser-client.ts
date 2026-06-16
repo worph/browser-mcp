@@ -14,42 +14,53 @@ export class BrowserClient {
     if (this.browser) return;
 
     const config = getConfig();
-    const { width, height } = config.browser.viewport;
+    const cdpUrl = `http://127.0.0.1:${config.browser.cdpPort}`;
 
-    this.browser = await chromium.launch({
-      headless: false,
-      args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-software-rasterizer",
-        `--window-size=${width},${height}`,
-      ],
-    });
+    // Attach to the shared Chrome that supervisord launched on display :99.
+    // chrome-devtools-mcp drives the same browser over CDP, and noVNC mirrors it.
+    this.browser = await this.connectWithRetry(cdpUrl);
 
-    this.context = await this.browser.newContext({
-      viewport: { width, height },
-    });
-
-    this.page = await this.context.newPage();
+    // A normally-launched Chrome exposes a default browser context with an
+    // initial page; reuse it so the REST/web-UI surface and the MCP surface
+    // operate on the same tab the user sees in noVNC.
+    this.context = this.browser.contexts()[0] ?? (await this.browser.newContext());
+    this.page = this.context.pages()[0] ?? (await this.context.newPage());
     this.setupConsoleListener();
 
     const defaultUrl = config.browser.defaultUrl;
-    if (defaultUrl && defaultUrl !== "about:blank") {
-      await this.page.goto(defaultUrl);
+    if (defaultUrl && defaultUrl !== "about:blank" && this.page.url() === "about:blank") {
+      await this.page.goto(defaultUrl).catch(() => {});
     }
 
-    console.log("Browser launched");
+    console.log(`Browser attached over CDP at ${cdpUrl}`);
+  }
+
+  private async connectWithRetry(cdpUrl: string): Promise<Browser> {
+    const maxAttempts = 30;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await chromium.connectOverCDP(cdpUrl);
+      } catch (err) {
+        lastErr = err;
+        // Chrome may still be starting up under supervisord; back off and retry.
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    throw new Error(
+      `Could not attach to Chrome at ${cdpUrl} after ${maxAttempts} attempts: ${String(lastErr)}`
+    );
   }
 
   async close(): Promise<void> {
     if (this.browser) {
+      // Disconnect only — Chrome itself is owned by supervisord and stays up.
       await this.browser.close().catch(() => {});
       this.browser = null;
       this.context = null;
       this.page = null;
       this.consoleLogs = [];
-      console.log("Browser closed");
+      console.log("Browser detached");
     }
   }
 

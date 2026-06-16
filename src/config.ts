@@ -19,6 +19,8 @@ export function loadConfig(): AppConfig {
 
   const browserOverrides: Record<string, unknown> = {};
   if (process.env.BROWSER_DEFAULT_URL) browserOverrides.defaultUrl = process.env.BROWSER_DEFAULT_URL;
+  if (process.env.CDP_PORT) browserOverrides.cdpPort = parseInt(process.env.CDP_PORT, 10);
+  if (process.env.CHROME_EXECUTABLE_PATH) browserOverrides.chromeExecutablePath = process.env.CHROME_EXECUTABLE_PATH;
   if (Object.keys(browserOverrides).length > 0) envOverrides.browser = browserOverrides;
 
   const vncOverrides: Record<string, unknown> = {};
