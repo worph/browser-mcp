@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11vnc \
     novnc \
     websockify \
+    fluxbox \
     supervisor \
     ca-certificates \
     curl \
@@ -55,9 +56,9 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 
-# Copy web UI, config, and the shared-Chrome launcher
+# Copy web UI, config, and the fluxbox window-manager rules
 COPY web/ ./web/
-COPY scripts/ ./scripts/
+COPY fluxbox/ /root/.fluxbox/
 COPY config.example.json ./config.json
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 

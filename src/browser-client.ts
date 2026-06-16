@@ -1,6 +1,7 @@
 import { chromium, Browser, BrowserContext, Page } from "playwright-core";
 import { BrowserStatus, ConsoleEntry } from "./types";
 import { getConfig } from "./config";
+import { ChromeManager } from "./chrome-manager";
 
 const MAX_CONSOLE_ENTRIES = 1000;
 
@@ -9,15 +10,29 @@ export class BrowserClient {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private consoleLogs: ConsoleEntry[] = [];
+  private chrome: ChromeManager;
+
+  constructor(chrome: ChromeManager) {
+    this.chrome = chrome;
+  }
 
   async launch(): Promise<void> {
-    if (this.browser) return;
+    if (this.browser?.isConnected()) return;
+    // Drop a stale handle from a previous Chrome that has since gone away, so we
+    // re-attach instead of early-returning on a dead reference.
+    if (this.browser && !this.browser.isConnected()) {
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+    }
 
     const config = getConfig();
     const cdpUrl = `http://127.0.0.1:${config.browser.cdpPort}`;
 
-    // Attach to the shared Chrome that supervisord launched on display :99.
-    // chrome-devtools-mcp drives the same browser over CDP, and noVNC mirrors it.
+    // Make sure the shared Chrome is up (lazy start / wakes a reaped browser),
+    // then attach over CDP. chrome-devtools-mcp drives the same browser, and
+    // noVNC mirrors it.
+    await this.chrome.ensureRunning();
     this.browser = await this.connectWithRetry(cdpUrl);
 
     // A normally-launched Chrome exposes a default browser context with an

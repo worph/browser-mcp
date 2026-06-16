@@ -7,7 +7,9 @@
       "width": 1280,
       "height": 720
     },
-    "autoLaunch": true
+    "autoLaunch": false,
+    "cdpPort": 9222,
+    "idleTtlMs": 7200000
   },
   "vnc": {
     "resolution": "1280x720x24"

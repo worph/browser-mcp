@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response, Router } from "express";
 import { UpstreamClient } from "./upstream-client";
+import { ChromeManager } from "./chrome-manager";
 
 /**
  * MCP HTTP server. Exposes the Streamable HTTP transport at /mcp and forwards
@@ -14,9 +15,11 @@ import { UpstreamClient } from "./upstream-client";
  */
 export class MCPServer {
   private upstream: UpstreamClient;
+  private chrome: ChromeManager;
 
-  constructor(upstream: UpstreamClient) {
+  constructor(upstream: UpstreamClient, chrome: ChromeManager) {
     this.upstream = upstream;
+    this.chrome = chrome;
   }
 
   private createServer(): Server {
@@ -36,6 +39,8 @@ export class MCPServer {
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+      // Mark in-flight so the idle reaper won't kill Chrome mid-call.
+      this.chrome.beginCall();
       try {
         // chrome-devtools-mcp returns an MCP CallToolResult; pass it through verbatim.
         const result = await this.upstream.callTool(name, args ?? {});
@@ -46,6 +51,8 @@ export class MCPServer {
           content: [{ type: "text" as const, text: `Error: ${message}` }],
           isError: true,
         };
+      } finally {
+        this.chrome.endCall();
       }
     });
   }

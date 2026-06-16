@@ -9,6 +9,8 @@ services:
       - VNC_RESOLUTION=1280x720x24
       - DISCOVERY_PORT=9099
       - MCP_PORT=9746
+      # Kill idle Chrome after this many ms (default 2h); respawns on next use.
+      - IDLE_TTL_MS=${IDLE_TTL_MS:-7200000}
     restart: unless-stopped
     networks:
       - mcp-network

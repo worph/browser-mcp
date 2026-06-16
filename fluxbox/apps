@@ -1,0 +1,9 @@
+# Fluxbox per-application rules.
+# Maximize and undecorate every window (only Chrome runs here) so new tabs /
+# new_page windows fill the 1280x720 display instead of opening shifted and
+# overflowing off-screen. Switch between stacked windows via the fluxbox toolbar
+# (taskbar) or Alt+Tab; programmatically, use select_page({bringToFront:true}).
+[app] (name=.*)
+  [Maximized]	{yes}
+  [Deco]	{NONE}
+[end]
