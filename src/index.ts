@@ -24,6 +24,11 @@ async function main(): Promise<void> {
   const upstream = new UpstreamClient({
     browserUrl,
     ensureBrowser: () => chrome.ensureRunning(),
+    // Wedge recovery: kill + relaunch the shared Chrome, then the child re-attaches.
+    restartBrowser: async () => {
+      await chrome.stop();
+      await chrome.ensureRunning();
+    },
   });
   const browserClient = new BrowserClient(chrome);
   const mcpServer = new MCPServer(upstream, chrome);

@@ -36,6 +36,9 @@ const CONNECTION_ERROR_RE =
 const BROWSER_GONE_RE =
   /target (page|closed)|session closed|protocol error|browser (has been|was) (closed|disconnected)|browser disconnected|websocket connection clos|no target with given id|connection closed|could not connect to chrome|chrome is not running|failed to fetch browser/i;
 
+/** MCP/transport errors that mean the call exceeded its time budget. */
+const TIMEOUT_ERROR_RE = /timed out|timeout|-32001/i;
+
 export interface UpstreamClientOptions {
   /** CDP endpoint of the shared Chrome, e.g. http://127.0.0.1:9222 */
   browserUrl: string;
@@ -44,6 +47,20 @@ export interface UpstreamClientOptions {
    * the lifecycle/TTL). Called on every callTool so a reaped browser wakes up.
    */
   ensureBrowser?: () => Promise<void>;
+  /**
+   * Hard-restart the shared Chrome (kill + relaunch). Used to recover a *wedged*
+   * browser — a reconnect alone re-attaches to the same stuck Chrome, so a
+   * timeout/target-gone escalates to this. Automates the operator "just restart
+   * it" that previously unwedged long runs.
+   */
+  restartBrowser?: () => Promise<void>;
+  /**
+   * Per-tool-call hard timeout (ms). A CDP op that wedges is aborted and
+   * recovered instead of hanging until the upstream Beacon tears down the whole
+   * agent session (which surfaces as an unhandled TaskGroup error). Defaults to
+   * env TOOL_CALL_TIMEOUT_MS or 120000.
+   */
+  toolCallTimeoutMs?: number;
 }
 
 /** Resolve the chrome-devtools-mcp entrypoint so we can run it with our own node. */
@@ -75,6 +92,8 @@ function resolveChromeDevtoolsMcp(): { command: string; baseArgs: string[] } {
 export class UpstreamClient {
   private readonly browserUrl: string;
   private readonly ensureBrowser?: () => Promise<void>;
+  private readonly restartBrowser?: () => Promise<void>;
+  private readonly toolCallTimeoutMs: number;
   private client: Client | null = null;
   private transport: StdioClientTransport | null = null;
   private tools: Tool[] = [];
@@ -84,6 +103,9 @@ export class UpstreamClient {
   constructor(options: UpstreamClientOptions) {
     this.browserUrl = options.browserUrl;
     this.ensureBrowser = options.ensureBrowser;
+    this.restartBrowser = options.restartBrowser;
+    this.toolCallTimeoutMs =
+      options.toolCallTimeoutMs ?? (Number(process.env.TOOL_CALL_TIMEOUT_MS) || 120_000);
   }
 
   /** Connect (idempotent). Safe to call repeatedly; concurrent calls share one attempt. */
@@ -172,6 +194,24 @@ export class UpstreamClient {
     return CONNECTION_ERROR_RE.test(msg);
   }
 
+  private isTimeoutError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return TIMEOUT_ERROR_RE.test(msg);
+  }
+
+  /**
+   * A well-formed MCP error result. callTool returns this instead of throwing so
+   * the proxy always emits valid JSON-RPC — a single failed op can never break
+   * the HTTP/SSE stream and crash the upstream Beacon's task group.
+   */
+  private errorResult(name: string, err: unknown): Record<string, unknown> {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: "text", text: `browser-mcp: tool "${name}" failed: ${msg}` }],
+      isError: true,
+    };
+  }
+
   /** Detect a tool result whose error text means the browser/target is gone. */
   private isBrowserGoneResult(result: unknown): boolean {
     const r = result as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
@@ -203,28 +243,62 @@ export class UpstreamClient {
     if (this.ensureBrowser) await this.ensureBrowser();
     try {
       const client = await this.ensureConnected();
-      const result = await client.callTool({ name, arguments: args });
+      // Hard time budget: a wedged CDP op must not hang the whole agent session.
+      const result = await client.callTool(
+        { name, arguments: args },
+        undefined,
+        { timeout: this.toolCallTimeoutMs }
+      );
       if (this.isBrowserGoneResult(result)) {
-        console.warn(`Tool "${name}" reported a dead browser; reconnecting and retrying once`);
-        return await this.reconnectAndRetry(name, args);
+        console.warn(`Tool "${name}" reported a dead browser; restarting Chrome and retrying once`);
+        return await this.recoverAndRetry(name, args, true);
       }
       return result;
     } catch (err) {
+      if (this.isTimeoutError(err)) {
+        // A hang almost always means Chrome itself is stuck — a child reconnect
+        // re-attaches to the same wedged browser, so escalate to a full restart.
+        console.warn(`Tool "${name}" timed out after ${this.toolCallTimeoutMs}ms; restarting Chrome and retrying once`);
+        return await this.recoverAndRetry(name, args, true);
+      }
       if (this.isConnectionError(err)) {
         console.warn(`Tool "${name}" failed on a closed connection; reconnecting and retrying once`);
-        return await this.reconnectAndRetry(name, args);
+        return await this.recoverAndRetry(name, args, false);
       }
-      throw err;
+      // Any other failure: a clean MCP error result, never a thrown exception
+      // through the transport.
+      return this.errorResult(name, err);
     }
   }
 
-  private async reconnectAndRetry(name: string, args: Record<string, unknown>): Promise<unknown> {
-    // Bring Chrome back first (a mid-call crash or reap), then respawn the child.
-    if (this.ensureBrowser) await this.ensureBrowser();
-    await this.forceReconnect();
-    const client = await this.ensureConnected();
-    // Single retry — if this also fails, surface the error rather than loop.
-    return client.callTool({ name, arguments: args });
+  /**
+   * Recover the browser and retry the call ONCE. `restartChrome` kills+relaunches
+   * Chrome (for a wedge/target-gone); otherwise just respawns the child (for a
+   * dropped connection to a healthy Chrome). Always resolves to a valid MCP
+   * result — on a second failure it returns an error result rather than throwing.
+   */
+  private async recoverAndRetry(
+    name: string,
+    args: Record<string, unknown>,
+    restartChrome: boolean
+  ): Promise<unknown> {
+    try {
+      if (restartChrome && this.restartBrowser) {
+        await this.restartBrowser();
+      } else if (this.ensureBrowser) {
+        await this.ensureBrowser();
+      }
+      await this.forceReconnect();
+      const client = await this.ensureConnected();
+      return await client.callTool(
+        { name, arguments: args },
+        undefined,
+        { timeout: this.toolCallTimeoutMs }
+      );
+    } catch (err) {
+      console.error(`Tool "${name}" failed after recovery+retry:`, err instanceof Error ? err.message : err);
+      return this.errorResult(name, err);
+    }
   }
 
   /** Tear down the child but stay re-establishable (used by the idle reaper). */

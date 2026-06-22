@@ -74,8 +74,29 @@ export class MCPServer {
       res.on("close", () => {
         server.close().catch(console.error);
       });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (err) {
+        // Never let a transport-layer error become an unhandled rejection: that
+        // aborts the HTTP response mid-stream and crashes the upstream Beacon's
+        // task group, killing the whole agent session. Return a JSON-RPC error
+        // if we still can, otherwise just end the response cleanly.
+        console.error("MCP request handling error:", err);
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: "Internal error handling MCP request" },
+            id: null,
+          });
+        } else {
+          try {
+            res.end();
+          } catch {
+            /* response already torn down */
+          }
+        }
+      }
     });
 
     return router;
