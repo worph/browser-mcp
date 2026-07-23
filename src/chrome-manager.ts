@@ -103,9 +103,41 @@ export class ChromeManager {
     }
   }
 
+  /**
+   * Disable Chrome's password-manager "save password?" and "found in a data
+   * breach" bubbles. These steal keyboard focus during automated logins (the
+   * weak demo/demodemo creds trigger the leak warning) and can derail a flow.
+   * The CLI feature flag covers leak detection; the save bubble is only governed
+   * by these profile prefs. Merged into the existing Preferences so persisted
+   * cookies/state are preserved.
+   */
+  private seedProfilePrefs(): void {
+    const def = path.join(USER_DATA_DIR, "Default");
+    const prefsPath = path.join(def, "Preferences");
+    let prefs: any = {};
+    try {
+      prefs = JSON.parse(fs.readFileSync(prefsPath, "utf8"));
+    } catch {
+      /* no existing prefs — start fresh */
+    }
+    prefs.credentials_enable_service = false;
+    prefs.profile = {
+      ...(prefs.profile || {}),
+      password_manager_enabled: false,
+      password_manager_leak_detection: false,
+    };
+    try {
+      fs.mkdirSync(def, { recursive: true });
+      fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+    } catch (err) {
+      console.warn("Could not seed profile prefs:", err);
+    }
+  }
+
   private async doStart(): Promise<void> {
     if (this.proc && this.proc.exitCode !== null) this.proc = null;
     this.clearSessionState();
+    this.seedProfilePrefs();
 
     const exe = this.opts.executablePath || chromium.executablePath();
     const { width, height } = this.opts.viewport;
@@ -125,7 +157,13 @@ export class ChromeManager {
         "--disable-software-rasterizer",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-features=Translate",
+        // Translate popup; PasswordLeakDetection = the "password found in a data
+        // breach" warning that fires on weak automated logins (e.g. demo/demodemo);
+        // AutofillServerCommunication stops autofill calling Google servers.
+        "--disable-features=Translate,PasswordLeakDetection,AutofillServerCommunication",
+        // Don't touch the OS keyring (gnome-keyring) — in a headless container it
+        // can block or pop an unlock prompt on first credential use.
+        "--password-store=basic",
         // Suppress the crash-restore bubble UI (tab restore itself is prevented
         // by clearSessionState() above; cookies persist via the user-data-dir).
         "--hide-crash-restore-bubble",
