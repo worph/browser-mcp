@@ -254,10 +254,54 @@ export class BrowserClient {
 
   // ── Actions ────────────────────────────────────────────────────────────
 
+  /**
+   * Go to a URL.
+   *
+   * The title is read defensively, and that is not paranoia. A single-page app
+   * answers the navigation and *then* decides where it is really going: Docmost
+   * serves the page, redirects to /login client-side, and destroys the
+   * execution context underneath us. `page.title()` issued in that window
+   * throws "Execution context was destroyed", and because it threw, the whole
+   * call failed — a navigation that had in fact succeeded, reported as a 500,
+   * intermittently, depending on which side of the redirect the read landed.
+   *
+   * The navigation is the result. The title is metadata about it, so it must
+   * never be the reason the call fails: one retry once the context settles,
+   * then an empty title rather than an error.
+   */
   async navigate(url: string, waitUntil?: "load" | "domcontentloaded" | "networkidle", pageId?: string): Promise<{ url: string; title: string }> {
     return this.withPage(async (page) => {
-      await page.goto(url, { waitUntil: waitUntil || "load" });
-      return { url: page.url(), title: await page.title() };
+      try {
+        await page.goto(url, { waitUntil: waitUntil || "load" });
+      } catch (err) {
+        /**
+         * The other half of the same race, and it wears two faces. When the app
+         * redirects while Playwright is still waiting for the load it was asked
+         * for, `goto` rejects either with "interrupted by another navigation" or
+         * with `net::ERR_ABORTED` — Chrome cancelling the original request
+         * because the page went somewhere else. Both mean the browser navigated,
+         * to the place the app insisted on going. That is arrival, and the caller
+         * finds out where by reading the url back.
+         *
+         * Only these are forgiven. A DNS failure, a refused connection or a
+         * timeout is a navigation that did not happen, and must still be
+         * reported as one. Nor does forgiving them assert that the right page is
+         * up: every recipe opens with a `wait:` for something that only exists
+         * there, which is the real check.
+         */
+        const message = err instanceof Error ? err.message : String(err);
+        const redirectedAway = /interrupted by another navigation|net::ERR_ABORTED/i.test(message);
+        if (!redirectedAway) throw err;
+        await page.waitForLoadState("load").catch(() => undefined);
+      }
+      for (const attempt of [0, 1]) {
+        try {
+          return { url: page.url(), title: await page.title() };
+        } catch {
+          if (attempt === 0) await page.waitForTimeout(1000);
+        }
+      }
+      return { url: page.url(), title: "" };
     }, pageId);
   }
 
