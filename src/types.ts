@@ -21,6 +21,27 @@ export const BrowserConfigSchema = z.object({
   // Kill Chrome after this many ms of inactivity to reclaim RSS; it respawns on
   // the next MCP/REST use. Default 2h. Set 0 to disable the reaper.
   idleTtlMs: z.number().int().min(0).default(2 * 60 * 60 * 1000),
+  // Where the profile lives: cookies, logins, everything worth keeping. Mount
+  // it on a volume. It used to be /tmp/chrome-profile, which is the one
+  // directory whose name means discardable — and tmpfs on some hosts.
+  userDataDir: z.string().default("/data/chrome-profile"),
+  // >1 renders everything larger instead of leaving a viewer to scale it down.
+  // Read only at launch; the profile outlives the process, so a restart is cheap.
+  deviceScaleFactor: z.number().min(0.5).max(4).default(1),
+});
+
+/**
+ * Tabs the server did not open still cost memory. `off` keeps today's
+ * behaviour exactly; `log` reports what it would close and closes nothing,
+ * which is how you find out whether a busy instance actually leaks before
+ * acting on it; `on` collects.
+ */
+export const PageCollectorModeSchema = z.enum(["off", "log", "on"]);
+
+export const PagesConfigSchema = z.object({
+  collector: PageCollectorModeSchema.default("off"),
+  // How long a tab must sit unchanged before it is fair game.
+  ttlMs: z.number().int().min(60_000).default(30 * 60 * 1000),
 });
 
 export const VncConfigSchema = z.object({
@@ -31,10 +52,13 @@ export const AppConfigSchema = z.object({
   port: z.number().int().min(1).max(65535).default(9746),
   hostname: z.string().default("browsermcp"),
   browser: BrowserConfigSchema.default({}),
+  pages: PagesConfigSchema.default({}),
   vnc: VncConfigSchema.default({}),
 });
 
 export type BrowserConfig = z.infer<typeof BrowserConfigSchema>;
+export type PagesConfig = z.infer<typeof PagesConfigSchema>;
+export type PageCollectorMode = z.infer<typeof PageCollectorModeSchema>;
 export type VncConfig = z.infer<typeof VncConfigSchema>;
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

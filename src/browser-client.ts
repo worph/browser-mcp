@@ -5,11 +5,21 @@ import { ChromeManager } from "./chrome-manager";
 
 const MAX_CONSOLE_ENTRIES = 1000;
 
+/** The addressed tab has gone. Distinct from a bad request, and never a fallback. */
+export class PageGoneError extends Error {
+  constructor(readonly pageId: string) {
+    super(`page "${pageId}" is no longer open`);
+    this.name = "PageGoneError";
+  }
+}
+
 export class BrowserClient {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private consoleLogs: ConsoleEntry[] = [];
+  /** Playwright page → CDP target id. Weak so a closed tab is not held alive. */
+  private readonly targetIds = new WeakMap<Page, string>();
   private chrome: ChromeManager;
 
   constructor(chrome: ChromeManager) {
@@ -48,6 +58,76 @@ export class BrowserClient {
     }
 
     console.log(`Browser attached over CDP at ${cdpUrl}`);
+  }
+
+  // ── Tabs ───────────────────────────────────────────────────────────────
+
+  /**
+   * Chrome's own view of what is open.
+   *
+   * Read over CDP's HTTP endpoint rather than from Playwright, because it sees
+   * every tab — including the ones `chrome-devtools-mcp` opened, which are
+   * exactly the ones that leak and which Playwright's context would only show
+   * us if we happened to be attached when they appeared.
+   */
+  async listTargets(): Promise<Array<{ pageId: string; url: string; title: string }>> {
+    const { browser } = getConfig();
+    const res = await fetch(`http://127.0.0.1:${browser.cdpPort}/json/list`);
+    const targets = (await res.json()) as Array<{ id: string; url: string; title: string; type: string }>;
+    return targets
+      .filter((t) => t.type === "page")
+      .map((t) => ({ pageId: t.id, url: t.url, title: t.title }));
+  }
+
+  /** The CDP target id of a Playwright page. Cached — it never changes. */
+  private async targetIdOf(page: Page): Promise<string> {
+    const cached = this.targetIds.get(page);
+    if (cached) return cached;
+    const session = await this.context!.newCDPSession(page);
+    try {
+      const { targetInfo } = (await session.send("Target.getTargetInfo")) as {
+        targetInfo: { targetId: string };
+      };
+      this.targetIds.set(page, targetInfo.targetId);
+      return targetInfo.targetId;
+    } finally {
+      await session.detach().catch(() => {});
+    }
+  }
+
+  /**
+   * Resolve a tab by id.
+   *
+   * Answers undefined rather than falling back to the current page: acting on
+   * the wrong tab because the intended one has gone is the failure this whole
+   * addressing scheme exists to prevent.
+   */
+  private async pageById(pageId: string): Promise<Page | undefined> {
+    await this.launch();
+    for (const page of this.context!.pages()) {
+      if (page.isClosed()) continue;
+      if ((await this.targetIdOf(page)) === pageId) return page;
+    }
+    return undefined;
+  }
+
+  /** Open a tab of one's own, rather than sharing whatever is first. */
+  async newPage(url?: string): Promise<{ pageId: string; url: string; title: string }> {
+    await this.launch();
+    const page = await this.context!.newPage();
+    if (url) await page.goto(url).catch(() => {});
+    return {
+      pageId: await this.targetIdOf(page),
+      url: page.url(),
+      title: await page.title().catch(() => ""),
+    };
+  }
+
+  async closePage(pageId: string): Promise<boolean> {
+    const page = await this.pageById(pageId);
+    if (!page) return false;
+    await page.close().catch(() => {});
+    return true;
   }
 
   private async connectWithRetry(cdpUrl: string): Promise<Browser> {
@@ -129,8 +209,23 @@ export class BrowserClient {
     });
   }
 
-  private async withPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
-    if (!this.page || !this.isRunning()) {
+  /**
+   * Run against the working page, re-resolving it if it has gone.
+   *
+   * The `isClosed()` check is not paranoia: this browser is shared, and
+   * `chrome-devtools-mcp` opens and closes tabs on it. Without the check, a
+   * client that closed our page left `this.page` pointing at a dead handle
+   * forever — `launch()` early-returns while the browser is still connected,
+   * so every later call threw until Chrome itself restarted.
+   */
+  private async withPage<T>(fn: (page: Page) => Promise<T>, pageId?: string): Promise<T> {
+    if (pageId) {
+      const page = await this.pageById(pageId);
+      if (!page) throw new PageGoneError(pageId);
+      return fn(page);
+    }
+    if (!this.page || this.page.isClosed() || !this.isRunning()) {
+      this.page = null;
       await this.launch();
     }
     try {
@@ -151,21 +246,21 @@ export class BrowserClient {
 
   // ── Actions ────────────────────────────────────────────────────────────
 
-  async navigate(url: string, waitUntil?: "load" | "domcontentloaded" | "networkidle"): Promise<{ url: string; title: string }> {
+  async navigate(url: string, waitUntil?: "load" | "domcontentloaded" | "networkidle", pageId?: string): Promise<{ url: string; title: string }> {
     return this.withPage(async (page) => {
       await page.goto(url, { waitUntil: waitUntil || "load" });
       return { url: page.url(), title: await page.title() };
-    });
+    }, pageId);
   }
 
-  async click(selector: string, options?: { button?: "left" | "right" | "middle"; clickCount?: number }): Promise<{ success: true }> {
+  async click(selector: string, options?: { button?: "left" | "right" | "middle"; clickCount?: number }, pageId?: string): Promise<{ success: true }> {
     return this.withPage(async (page) => {
       await page.click(selector, options);
       return { success: true as const };
-    });
+    }, pageId);
   }
 
-  async type(selector: string, text: string, delay?: number): Promise<{ success: true }> {
+  async type(selector: string, text: string, delay?: number, pageId?: string): Promise<{ success: true }> {
     return this.withPage(async (page) => {
       await page.fill(selector, text);
       if (delay) {
@@ -174,10 +269,10 @@ export class BrowserClient {
         await page.type(selector, text, { delay });
       }
       return { success: true as const };
-    });
+    }, pageId);
   }
 
-  async screenshot(selector?: string, fullPage?: boolean): Promise<string> {
+  async screenshot(selector?: string, fullPage?: boolean, pageId?: string): Promise<string> {
     return this.withPage(async (page) => {
       let buffer: Buffer;
       if (selector) {
@@ -186,54 +281,95 @@ export class BrowserClient {
         buffer = await page.screenshot({ fullPage: fullPage ?? false });
       }
       return buffer.toString("base64");
-    });
+    }, pageId);
   }
 
-  async evaluate(script: string): Promise<unknown> {
+  /**
+   * Evaluate a script in the page.
+   *
+   * Playwright treats a *string* as an expression, so `() => { ... }` used to
+   * evaluate to a function object and come back as `undefined` — silently, and
+   * indistinguishably from an empty result. `chrome-devtools-mcp`, driving the
+   * same Chrome, takes the opposite dialect. Callers now get to write either:
+   * the wrapper invokes what it is given if it turns out to be callable.
+   */
+  async evaluate(script: string, pageId?: string): Promise<unknown> {
     return this.withPage(async (page) => {
-      return await page.evaluate(script);
-    });
+      return await page.evaluate(
+        `(() => { const __f = (${script}); return typeof __f === "function" ? __f() : __f })()`
+      );
+    }, pageId);
   }
 
-  async getText(selector: string): Promise<{ text: string }> {
+  /**
+   * Is anything matching this selector on the page right now?
+   *
+   * Deliberately not a wait: presence is usually being tested for *absence*
+   * (is the login form gone yet), and waiting for something that should not be
+   * there adds its whole timeout to every healthy call.
+   */
+  async exists(selector: string, pageId?: string): Promise<{ exists: boolean }> {
+    return this.withPage(async (page) => {
+      const count = await page.locator(selector).count();
+      return { exists: count > 0 };
+    }, pageId);
+  }
+
+  /**
+   * Press a key or a combination — `Enter`, `Escape`, `Control+V`.
+   *
+   * The primitive nothing else here could stand in for: real destinations
+   * submit forms with Enter, close modals with Escape, and paste with Ctrl+V.
+   * With a selector the element is focused first, which is what makes it
+   * usable without a preceding click.
+   */
+  async press(key: string, selector?: string, pageId?: string): Promise<{ success: true }> {
+    return this.withPage(async (page) => {
+      if (selector) await page.locator(selector).focus();
+      await page.keyboard.press(key);
+      return { success: true as const };
+    }, pageId);
+  }
+
+  async getText(selector: string, pageId?: string): Promise<{ text: string }> {
     return this.withPage(async (page) => {
       const text = await page.locator(selector).textContent() || "";
       return { text };
-    });
+    }, pageId);
   }
 
-  async getPageContent(): Promise<string> {
+  async getPageContent(pageId?: string): Promise<string> {
     return this.withPage(async (page) => {
       return await page.content();
-    });
+    }, pageId);
   }
 
-  async waitFor(selector: string, options?: { state?: "attached" | "detached" | "visible" | "hidden"; timeout?: number }): Promise<{ success: true }> {
+  async waitFor(selector: string, options?: { state?: "attached" | "detached" | "visible" | "hidden"; timeout?: number }, pageId?: string): Promise<{ success: true }> {
     return this.withPage(async (page) => {
       await page.locator(selector).waitFor(options);
       return { success: true as const };
-    });
+    }, pageId);
   }
 
-  async goBack(): Promise<{ url: string; title: string }> {
+  async goBack(pageId?: string): Promise<{ url: string; title: string }> {
     return this.withPage(async (page) => {
       await page.goBack();
       return { url: page.url(), title: await page.title() };
-    });
+    }, pageId);
   }
 
-  async goForward(): Promise<{ url: string; title: string }> {
+  async goForward(pageId?: string): Promise<{ url: string; title: string }> {
     return this.withPage(async (page) => {
       await page.goForward();
       return { url: page.url(), title: await page.title() };
-    });
+    }, pageId);
   }
 
-  async setViewport(width: number, height: number): Promise<{ width: number; height: number }> {
+  async setViewport(width: number, height: number, pageId?: string): Promise<{ width: number; height: number }> {
     return this.withPage(async (page) => {
       await page.setViewportSize({ width, height });
       return { width, height };
-    });
+    }, pageId);
   }
 
   getConsoleLogs(clear?: boolean): ConsoleEntry[] {
@@ -244,11 +380,11 @@ export class BrowserClient {
     return logs;
   }
 
-  async pdf(): Promise<string> {
+  async pdf(pageId?: string): Promise<string> {
     return this.withPage(async (page) => {
       const buffer = await page.pdf();
       return buffer.toString("base64");
-    });
+    }, pageId);
   }
 
   async getCookies(urls?: string[]): Promise<unknown[]> {

@@ -22,7 +22,16 @@ export function loadConfig(): AppConfig {
   if (process.env.CDP_PORT) browserOverrides.cdpPort = parseInt(process.env.CDP_PORT, 10);
   if (process.env.CHROME_EXECUTABLE_PATH) browserOverrides.chromeExecutablePath = process.env.CHROME_EXECUTABLE_PATH;
   if (process.env.IDLE_TTL_MS) browserOverrides.idleTtlMs = parseInt(process.env.IDLE_TTL_MS, 10);
+  if (process.env.CHROME_USER_DATA_DIR) browserOverrides.userDataDir = process.env.CHROME_USER_DATA_DIR;
+  if (process.env.CHROME_DEVICE_SCALE_FACTOR) {
+    browserOverrides.deviceScaleFactor = Number(process.env.CHROME_DEVICE_SCALE_FACTOR);
+  }
   if (Object.keys(browserOverrides).length > 0) envOverrides.browser = browserOverrides;
+
+  const pagesOverrides: Record<string, unknown> = {};
+  if (process.env.PAGE_COLLECTOR) pagesOverrides.collector = process.env.PAGE_COLLECTOR;
+  if (process.env.PAGE_TTL_MS) pagesOverrides.ttlMs = parseInt(process.env.PAGE_TTL_MS, 10);
+  if (Object.keys(pagesOverrides).length > 0) envOverrides.pages = pagesOverrides;
 
   const vncOverrides: Record<string, unknown> = {};
   if (process.env.VNC_RESOLUTION) vncOverrides.resolution = process.env.VNC_RESOLUTION;

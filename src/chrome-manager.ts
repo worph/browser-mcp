@@ -16,8 +16,6 @@ import { chromium } from "playwright-core";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const USER_DATA_DIR = "/tmp/chrome-profile";
-
 export interface ChromeManagerOptions {
   cdpPort: number;
   viewport: { width: number; height: number };
@@ -25,7 +23,22 @@ export interface ChromeManagerOptions {
   executablePath?: string;
   /** Kill Chrome after this many ms of inactivity (0 disables the reaper). */
   idleTtlMs: number;
+  /**
+   * Where the profile lives — cookies, logins, everything worth keeping.
+   * Mount this on a volume: it is the one durable thing in the container.
+   */
+  userDataDir: string;
+  /**
+   * Chrome's device scale factor. >1 renders everything larger, which is what
+   * you want when the desktop is watched through a viewer that scales it down.
+   * Read only at launch, so changing it needs a restart — cheap, because the
+   * profile outlives the process.
+   */
+  deviceScaleFactor: number;
 }
+
+/** What the health endpoint needs to tell a deliberate stop from a broken one. */
+export type ChromeState = "running" | "starting" | "idle" | "failing";
 
 export class ChromeManager {
   private readonly opts: ChromeManagerOptions;
@@ -36,9 +49,44 @@ export class ChromeManager {
   private inFlight = 0;
   private reaper: NodeJS.Timeout | null = null;
   private onReap?: () => Promise<void> | void;
+  /**
+   * Launches that failed back to back. A browser reaped on purpose is healthy;
+   * a browser that cannot start is not, and until now the two were
+   * indistinguishable from outside — the container reported healthy right
+   * through a Chrome that exited on every attempt.
+   */
+  private consecutiveLaunchFailures = 0;
+  private lastLaunchError: string | null = null;
+  private lastExitCode: number | null = null;
 
   constructor(opts: ChromeManagerOptions) {
     this.opts = opts;
+  }
+
+  /** Enough for a healthcheck to tell "off on purpose" from "cannot start". */
+  state(): {
+    chrome: ChromeState;
+    consecutiveLaunchFailures: number;
+    lastLaunchError: string | null;
+    lastExitCode: number | null;
+  } {
+    const chrome: ChromeState = this.isRunning()
+      ? "running"
+      : this.starting
+        ? "starting"
+        : this.consecutiveLaunchFailures > 0
+          ? "failing"
+          : "idle";
+    return {
+      chrome,
+      consecutiveLaunchFailures: this.consecutiveLaunchFailures,
+      lastLaunchError: this.lastLaunchError,
+      lastExitCode: this.lastExitCode,
+    };
+  }
+
+  get profileDir(): string {
+    return this.opts.userDataDir;
   }
 
   private cdpUrl(): string {
@@ -68,9 +116,17 @@ export class ChromeManager {
     this.recordActivity();
     if (this.isRunning()) return;
     if (this.starting) return this.starting;
-    this.starting = this.doStart().finally(() => {
-      this.starting = null;
-    });
+    this.starting = this.doStart()
+      .catch((err) => {
+        // Counted rather than only logged: a browser that fails every attempt
+        // is the one state the healthcheck has to be able to see.
+        this.consecutiveLaunchFailures++;
+        this.lastLaunchError = err instanceof Error ? err.message : String(err);
+        throw err;
+      })
+      .finally(() => {
+        this.starting = null;
+      });
     return this.starting;
   }
 
@@ -86,12 +142,29 @@ export class ChromeManager {
     }
   }
 
-  /** Drop session/tab state so a respawn doesn't restore stale tabs (cookies kept). */
+  /**
+   * Drop session/tab state so a respawn doesn't restore stale tabs (cookies kept).
+   *
+   * The Singleton files matter most and are the reason this is not optional.
+   * Chrome writes `SingletonLock` as a symlink naming the host and pid that
+   * hold the profile; a container that is recreated leaves one pointing at a
+   * host that no longer exists, and Chrome then refuses to start at all —
+   * exiting 21 on every attempt, forever. It is the one failure mode that
+   * persisting the profile introduces, so clearing it is what makes the volume
+   * safe to keep.
+   */
   private clearSessionState(): void {
-    const def = path.join(USER_DATA_DIR, "Default");
+    const def = path.join(this.opts.userDataDir, "Default");
     for (const f of ["Current Session", "Current Tabs", "Last Session", "Last Tabs"]) {
       try {
         fs.rmSync(path.join(def, f), { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+      try {
+        fs.rmSync(path.join(this.opts.userDataDir, f), { force: true });
       } catch {
         /* ignore */
       }
@@ -112,7 +185,7 @@ export class ChromeManager {
    * cookies/state are preserved.
    */
   private seedProfilePrefs(): void {
-    const def = path.join(USER_DATA_DIR, "Default");
+    const def = path.join(this.opts.userDataDir, "Default");
     const prefsPath = path.join(def, "Preferences");
     let prefs: any = {};
     try {
@@ -148,7 +221,7 @@ export class ChromeManager {
       [
         `--remote-debugging-port=${this.opts.cdpPort}`,
         "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${USER_DATA_DIR}`,
+        `--user-data-dir=${this.opts.userDataDir}`,
         `--window-size=${width},${height}`,
         "--window-position=0,0",
         "--no-sandbox",
@@ -168,6 +241,11 @@ export class ChromeManager {
         // by clearSessionState() above; cookies persist via the user-data-dir).
         "--hide-crash-restore-bubble",
         "--disable-session-crashed-bubble",
+        // Render everything larger rather than letting a viewer scale it down.
+        // Omitted entirely at 1 so the command line stays what it always was.
+        ...(this.opts.deviceScaleFactor !== 1
+          ? [`--force-device-scale-factor=${this.opts.deviceScaleFactor}`]
+          : []),
         this.opts.startUrl || "about:blank",
       ],
       {
@@ -179,6 +257,7 @@ export class ChromeManager {
     this.proc = proc;
     proc.on("exit", (code, signal) => {
       if (this.proc === proc) this.proc = null;
+      this.lastExitCode = code;
       if (this.intentionalStop) {
         console.log("Chrome stopped");
       } else {
@@ -192,6 +271,8 @@ export class ChromeManager {
     while (Date.now() < deadline) {
       if (await this.cdpReachable()) {
         console.log("Chrome ready");
+        this.consecutiveLaunchFailures = 0;
+        this.lastLaunchError = null;
         return;
       }
       if (!this.isRunning()) throw new Error("Chrome exited during startup");

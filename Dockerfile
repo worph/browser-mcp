@@ -71,7 +71,12 @@ RUN sed -i 's|<div id="noVNC_status_bar">|<div id="noVNC_status_bar" style="disp
 
 EXPOSE 9746
 
+# /api/health, not /api/status: status only proves this process answers, so a
+# Chrome that fails every launch used to report healthy forever. A browser the
+# idle reaper stopped on purpose stays healthy; one that cannot start does not.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf -o /dev/null -w '%{http_code}' http://localhost:9746/api/status | grep -qE '200|403' || exit 1
+    CMD curl -sf -o /dev/null http://localhost:9746/api/health || exit 1
+
+VOLUME ["/data/chrome-profile"]
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

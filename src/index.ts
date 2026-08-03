@@ -5,6 +5,7 @@ import { BrowserClient } from "./browser-client";
 import { UpstreamClient } from "./upstream-client";
 import { ChromeManager } from "./chrome-manager";
 import { createDiscoveryResponder } from "./mcp-announce";
+import { collectable, PageRegistry } from "./page-registry";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -19,6 +20,8 @@ async function main(): Promise<void> {
     startUrl: config.browser.defaultUrl,
     executablePath: config.browser.chromeExecutablePath || undefined,
     idleTtlMs: config.browser.idleTtlMs,
+    userDataDir: config.browser.userDataDir,
+    deviceScaleFactor: config.browser.deviceScaleFactor,
   });
 
   const upstream = new UpstreamClient({
@@ -51,7 +54,49 @@ async function main(): Promise<void> {
     await upstream.suspend();
   });
 
-  const { app, attachWebSocket } = createApp(mcpServer, browserClient);
+  const pages = new PageRegistry();
+
+  /**
+   * Close tabs nobody wants any more.
+   *
+   * Nothing has ever closed a tab on this browser: the only cleanup is the
+   * whole-Chrome idle reaper, and because it measures time since *any*
+   * activity, an instance in daily use never reaches it. Tabs therefore
+   * accumulate for the life of the container.
+   *
+   * Off by default, because the shared instance is in use and this changes
+   * behaviour for clients that never asked for it. `log` is the honest first
+   * step — it names what it would close and closes nothing, which is how you
+   * find out whether an instance really leaks before acting on it.
+   */
+  if (config.pages.collector !== "off") {
+    const mode = config.pages.collector;
+    console.log(`Page collector: ${mode} (ttl ${Math.round(config.pages.ttlMs / 60_000)}min)`);
+
+    const sweep = setInterval(async () => {
+      if (!chrome.isRunning()) return;
+      try {
+        const live = pages.observe(await browserClient.listTargets());
+        for (const { page, reason } of collectable(live, Date.now(), config.pages.ttlMs)) {
+          const age = Math.round((Date.now() - page.lastChangedAt) / 60_000);
+          const who = page.owner ?? "nobody";
+          const what = `${page.pageId} (${reason}, owner=${who}, idle ${age}min): ${page.url}`;
+          if (mode === "log") {
+            console.log(`[collector] would close ${what}`);
+            continue;
+          }
+          console.log(`[collector] closing ${what}`);
+          await browserClient.closePage(page.pageId).catch(() => {});
+          pages.forget(page.pageId);
+        }
+      } catch (err) {
+        console.warn("Page collector sweep failed:", err);
+      }
+    }, 60_000);
+    sweep.unref?.();
+  }
+
+  const { app, attachWebSocket } = createApp(mcpServer, browserClient, chrome, pages);
   const port = config.port;
 
   const server = app.listen(port, () => {

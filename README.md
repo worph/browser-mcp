@@ -44,7 +44,8 @@ docker compose up -d
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/status` | Browser health, current URL, viewport info |
+| `GET` | `/api/health` | Is Chrome up, idle, starting or failing to launch. What the container healthcheck asks |
+| `GET` | `/api/status` | Current URL, title, viewport |
 | `POST` | `/api/navigate` | Navigate to a URL |
 | `POST` | `/api/action` | Perform click, type, scroll actions |
 | `GET` | `/api/screenshot` | Capture current page screenshot |
@@ -53,6 +54,28 @@ docker compose up -d
 | `GET` | `/api/cookies` | Get cookies for current page |
 | `POST` | `/api/cookies` | Set cookies |
 | `DELETE` | `/api/cookies` | Clear cookies |
+| `POST` | `/api/pages` | Open a tab of your own — `{ owner, url }` → `{ pageId }` |
+| `GET` | `/api/pages` | Every tab Chrome has, with owner, idle time and any hold |
+| `POST` | `/api/pages/:id/keep` | Hold a tab open — "a human is looking at this" |
+| `DELETE` | `/api/pages/:id` | Close a tab |
+
+Every action takes an optional **`pageId`**. Without one it drives the first tab, exactly as it
+always has. With one it drives that tab, and answers **410** if it has gone rather than silently
+acting on somebody else's page — this browser is shared, and the tab you opened is not necessarily
+the tab that is first.
+
+### Writing scripts for `/api/evaluate`
+
+Both dialects work:
+
+```js
+() => document.title          // function declaration, as chrome-devtools-mcp takes
+document.title                // bare expression
+```
+
+Before 1.1 only the second did. Playwright evaluates a *string* as an expression, so a function
+declaration evaluated to a function object and came back as `undefined` — indistinguishable from an
+empty result, with no error anywhere. The wrapper now invokes what it is given if it is callable.
 
 ## MCP Tools
 
@@ -70,8 +93,47 @@ docker compose up -d
 | `set_viewport` | Change browser viewport size |
 | `get_console_logs` | Retrieve browser console output |
 | `pdf` | Generate PDF of current page |
+| `press` | Press a key or combination — `Enter`, `Escape`, `Control+V` |
+| `exists` | Whether a selector matches, without waiting for it |
 
 ## Configuration
+
+### Environment
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CHROME_USER_DATA_DIR` | `/data/chrome-profile` | Where logins live. **Mount this on a volume.** |
+| `CHROME_DEVICE_SCALE_FACTOR` | `1` | `--force-device-scale-factor`. Above 1 renders larger, for a desktop watched through a viewer that scales it down. Read at launch. |
+| `IDLE_TTL_MS` | `7200000` | Kill Chrome after this long with no activity. It respawns on next use. |
+| `PAGE_COLLECTOR` | `off` | `off` · `log` · `on` — see below |
+| `PAGE_TTL_MS` | `1800000` | How long a tab sits unchanged before it may be collected |
+| `VNC_RESOLUTION` | `1280x720x24` | Xvfb framebuffer |
+
+> ⚠️ **Upgrading from 1.0:** the profile moved from `/tmp/chrome-profile` to
+> `/data/chrome-profile`. If you were mounting the old path, either remount it at the new one or set
+> `CHROME_USER_DATA_DIR=/tmp/chrome-profile`. Getting this wrong loses every login in the profile.
+> `/tmp` was never the right home for the one durable thing in the container — it is tmpfs on some
+> hosts.
+
+### Collecting abandoned tabs
+
+Nothing used to close a tab. The only cleanup was the whole-Chrome idle reaper, and because it
+measures time since *any* activity, an instance in daily use never reaches it — so tabs accumulate
+for the life of the container, at 50–300 MB of Chrome RSS each.
+
+`PAGE_COLLECTOR` closes tabs that have sat unchanged for `PAGE_TTL_MS`:
+
+- **`off`** (default) — today's behaviour exactly.
+- **`log`** — names what it *would* close and closes nothing. Start here: it tells you whether an
+  instance actually leaks before anything is removed from under a live session.
+- **`on`** — collects.
+
+It will never close the last remaining tab, never one inside an unexpired `keep`, and never one
+whose URL or title has moved inside the TTL. A tab nobody registered is collectable once it is
+observably idle, since those are the ones that leak — so **a client that wants its tab left alone
+should open it through `POST /api/pages` and renew with `keep`.**
+
+### File
 
 Configuration via `config.json`:
 

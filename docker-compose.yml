@@ -11,6 +11,16 @@ services:
       - MCP_PORT=9746
       # Kill idle Chrome after this many ms (default 2h); respawns on next use.
       - IDLE_TTL_MS=${IDLE_TTL_MS:-7200000}
+      # Tabs are never closed unless this is on. `log` names what it would
+      # close and closes nothing — the honest first step on a shared instance.
+      - PAGE_COLLECTOR=${PAGE_COLLECTOR:-off}
+      - PAGE_TTL_MS=${PAGE_TTL_MS:-1800000}
+      # Above 1 renders larger, for a desktop watched through a scaling viewer.
+      - CHROME_DEVICE_SCALE_FACTOR=${CHROME_DEVICE_SCALE_FACTOR:-1}
+    volumes:
+      # The logins. Without this every image update signs the browser out of
+      # every site — the one expensive thing in here.
+      - chrome-profile:/data/chrome-profile
     restart: unless-stopped
     networks:
       - mcp-network
@@ -21,3 +31,6 @@ networks:
     external: true
   mcp-net:
     external: true
+
+volumes:
+  chrome-profile:

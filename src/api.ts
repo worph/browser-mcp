@@ -6,11 +6,17 @@ import { z } from "zod";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { getConfig, updateConfig } from "./config";
 import { MCPServer } from "./mcp-server";
-import { BrowserClient } from "./browser-client";
+import { BrowserClient, PageGoneError } from "./browser-client";
+import { ChromeManager } from "./chrome-manager";
+import { PageRegistry } from "./page-registry";
+
+const startedAt = Date.now();
 
 export function createApp(
   mcpServer: MCPServer,
-  browserClient: BrowserClient
+  browserClient: BrowserClient,
+  chrome: ChromeManager,
+  pages: PageRegistry
 ): { app: express.Application; attachWebSocket: (server: http.Server) => void } {
   const app = express();
 
@@ -37,10 +43,90 @@ export function createApp(
 
   // ── Status & Info ──────────────────────────────────────────────────────
 
+  /**
+   * Health, as distinct from "the process is answering".
+   *
+   * `/api/status` proves this Node server is up, which is all the container
+   * healthcheck used to ask — so a Chrome that exited on every launch attempt
+   * reported healthy indefinitely. The distinction that matters is between a
+   * browser stopped on purpose (the idle reaper did its job, perfectly
+   * healthy) and one that cannot start at all.
+   */
+  app.get("/api/health", (_req: Request, res: Response) => {
+    const state = chrome.state();
+    const ok = state.chrome !== "failing";
+    res.status(ok ? 200 : 503).json({
+      ok,
+      node: "up",
+      ...state,
+      profileDir: chrome.profileDir,
+      uptimeMs: Date.now() - startedAt,
+    });
+  });
+
   app.get("/api/status", async (_req: Request, res: Response) => {
     try {
       const status = await browserClient.getStatusAsync();
       res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** A tab that has gone is a refusal, never a quiet fallback onto another. */
+  function fail(res: Response, err: unknown): void {
+    if (err instanceof PageGoneError) {
+      res.status(410).json({ error: err.message, pageId: err.pageId });
+      return;
+    }
+    res.status(500).json({ error: String(err) });
+  }
+
+  // ── Tabs ───────────────────────────────────────────────────────────────
+  //
+  // A client that opens its own tab and says so is one the collector will not
+  // surprise, and one that never has to guess whether "the current page" is
+  // still its own. Everything here is optional: an action with no pageId
+  // behaves exactly as it always did.
+
+  app.post("/api/pages", async (req: Request, res: Response) => {
+    try {
+      const { owner, url } = req.body ?? {};
+      const page = await browserClient.newPage(url);
+      pages.track(page.pageId, owner ?? null, page.url, page.title);
+      res.status(201).json(page);
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.get("/api/pages", async (_req: Request, res: Response) => {
+    try {
+      // Observe first so tabs other clients opened are folded in, then list —
+      // `idleForMs` is what makes the answer readable at a glance.
+      pages.observe(await browserClient.listTargets());
+      res.json({ pages: pages.list() });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** "Someone is looking at this" — the one thing that outranks the collector. */
+  app.post("/api/pages/:id/keep", (req: Request, res: Response) => {
+    const ttlMs = Number(req.body?.ttlMs) || 15 * 60_000;
+    const page = pages.keep(req.params.id, ttlMs);
+    if (!page) {
+      res.status(410).json({ error: `page "${req.params.id}" is no longer open` });
+      return;
+    }
+    res.json({ pageId: page.pageId, keepUntil: page.keepUntil });
+  });
+
+  app.delete("/api/pages/:id", async (req: Request, res: Response) => {
+    try {
+      const closed = await browserClient.closePage(req.params.id);
+      pages.forget(req.params.id);
+      res.status(closed ? 200 : 410).json({ closed });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -67,15 +153,15 @@ export function createApp(
 
   app.post("/api/navigate", async (req: Request, res: Response) => {
     try {
-      const { url, waitUntil } = req.body;
+      const { url, waitUntil, pageId } = req.body;
       if (!url) {
         res.status(400).json({ error: "url is required" });
         return;
       }
-      const result = await browserClient.navigate(url, waitUntil);
+      const result = await browserClient.navigate(url, waitUntil, pageId);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      fail(res, err);
     }
   });
 
@@ -86,19 +172,19 @@ export function createApp(
 
       switch (action) {
         case "click":
-          result = await browserClient.click(params.selector, params);
+          result = await browserClient.click(params.selector, params, params.pageId);
           break;
         case "type":
-          result = await browserClient.type(params.selector, params.text, params.delay);
+          result = await browserClient.type(params.selector, params.text, params.delay, params.pageId);
           break;
         case "evaluate":
-          result = await browserClient.evaluate(params.script);
+          result = await browserClient.evaluate(params.script, params.pageId);
           break;
         case "getText":
-          result = await browserClient.getText(params.selector);
+          result = await browserClient.getText(params.selector, params.pageId);
           break;
         case "waitFor":
-          result = await browserClient.waitFor(params.selector, params);
+          result = await browserClient.waitFor(params.selector, params, params.pageId);
           break;
         case "goBack":
           result = await browserClient.goBack();
@@ -109,6 +195,12 @@ export function createApp(
         case "setViewport":
           result = await browserClient.setViewport(params.width, params.height);
           break;
+        case "press":
+          result = await browserClient.press(params.key, params.selector, params.pageId);
+          break;
+        case "exists":
+          result = await browserClient.exists(params.selector, params.pageId);
+          break;
         default:
           res.status(400).json({ error: `Unknown action: ${action}` });
           return;
@@ -116,18 +208,22 @@ export function createApp(
 
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      fail(res, err);
     }
   });
 
-  app.get("/api/screenshot", async (_req: Request, res: Response) => {
+  app.get("/api/screenshot", async (req: Request, res: Response) => {
     try {
-      const base64 = await browserClient.screenshot();
+      const base64 = await browserClient.screenshot(
+        undefined,
+        undefined,
+        typeof req.query.pageId === "string" ? req.query.pageId : undefined
+      );
       const buffer = Buffer.from(base64, "base64");
       res.set("Content-Type", "image/png");
       res.send(buffer);
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      fail(res, err);
     }
   });
 
@@ -142,15 +238,15 @@ export function createApp(
 
   app.post("/api/evaluate", async (req: Request, res: Response) => {
     try {
-      const { script } = req.body;
+      const { script, pageId } = req.body;
       if (!script) {
         res.status(400).json({ error: "script is required" });
         return;
       }
-      const result = await browserClient.evaluate(script);
+      const result = await browserClient.evaluate(script, pageId);
       res.json({ result });
     } catch (err) {
-      res.status(500).json({ error: String(err) });
+      fail(res, err);
     }
   });
 
