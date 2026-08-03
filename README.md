@@ -58,6 +58,34 @@ docker compose up -d
 | `GET` | `/api/pages` | Every tab Chrome has, with owner, idle time and any hold |
 | `POST` | `/api/pages/:id/keep` | Hold a tab open — "a human is looking at this" |
 | `DELETE` | `/api/pages/:id` | Close a tab |
+| `WS` | `/api/pages/:id/screencast` | Live view of one tab — JPEG frames out, input in |
+| `POST` | `/api/pages/:id/frame` | `{ selector }` → that element's page-space bounds |
+
+### Watching one tab
+
+`Page.startScreencast` is per *target*, so a live view shows the tab you asked for rather than
+whichever window the X display happens to be showing. Frames arrive as binary WebSocket messages;
+a small JSON text message carries the page size and scroll offset whenever they change, which is
+what a client needs to turn a click on its canvas into a click on the page.
+
+Input goes back over the same socket:
+
+```json
+{"type":"mouse","action":"mousePressed","x":640,"y":400}
+{"type":"key","action":"char","key":"a","text":"a"}
+{"type":"wheel","x":10,"y":10,"deltaX":0,"deltaY":240}
+```
+
+Coordinates are in **page space** — the client scales them, because the server has no idea how big
+anyone's canvas is and several people may be watching the same tab at once.
+
+Watchers share one stream per tab, refcounted: a second viewer does not restart or disturb the
+first, and the encode stops when the last one leaves. **A tab with a watcher is held against the
+page collector** for `SCREENCAST_KEEP_MS`, renewed while connected — closing a page somebody is
+reading is exactly what the ownership model exists to prevent.
+
+`/frame` exists because this server drives the browser as well as showing it: ask where the captcha
+or the composer is, and point the view at it. A remote desktop can never answer that question.
 
 Every action takes an optional **`pageId`**. Without one it drives the first tab, exactly as it
 always has. With one it drives that tab, and answers **410** if it has gone rather than silently
@@ -107,7 +135,18 @@ empty result, with no error anywhere. The wrapper now invokes what it is given i
 | `IDLE_TTL_MS` | `7200000` | Kill Chrome after this long with no activity. It respawns on next use. |
 | `PAGE_COLLECTOR` | `off` | `off` · `log` · `on` — see below |
 | `PAGE_TTL_MS` | `1800000` | How long a tab sits unchanged before it may be collected |
+| `SCREENCAST_QUALITY` | `60` | JPEG quality for live frames |
+| `SCREENCAST_MAX_WIDTH` | `1280` | cap frame width — a retina page would otherwise stream 4x the pixels |
+| `SCREENCAST_KEEP_MS` | `120000` | how long a watched tab is held against the collector |
 | `VNC_RESOLUTION` | `1280x720x24` | Xvfb framebuffer |
+
+### Why this is not headless
+
+Chrome runs **headful on Xvfb**, and noVNC is still here. `--headless=new` is close to a real
+browser but not identical, and destinations that care about automation can tell — which matters
+when the point of the container is publishing to real sites. The display stays; it simply stopped
+being the interface once screencast arrived. noVNC is now break-glass, for the things a per-tab
+stream structurally cannot show: Chrome's own UI, native dialogs, a file picker.
 
 > ⚠️ **Upgrading from 1.0:** the profile moved from `/tmp/chrome-profile` to
 > `/data/chrome-profile`. If you were mounting the old path, either remount it at the new one or set

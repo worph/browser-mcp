@@ -6,6 +6,7 @@ import { UpstreamClient } from "./upstream-client";
 import { ChromeManager } from "./chrome-manager";
 import { createDiscoveryResponder } from "./mcp-announce";
 import { collectable, PageRegistry } from "./page-registry";
+import { ScreencastHub } from "./screencast";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -57,6 +58,32 @@ async function main(): Promise<void> {
   const pages = new PageRegistry();
 
   /**
+   * A tab somebody is watching is a tab somebody is using, so the hub holds it
+   * against the collector for as long as a socket is open. Without this the
+   * collector could close a page out from under an operator mid-read — exactly
+   * the failure the ownership model exists to prevent.
+   */
+  const screencast = new ScreencastHub(
+    {
+      quality: config.screencast.quality,
+      maxWidth: config.screencast.maxWidth,
+      maxHeight: config.screencast.maxHeight,
+    },
+    (pageId, watching) => {
+      if (watching) pages.keep(pageId, config.screencast.keepMs);
+      else pages.release(pageId);
+    }
+  );
+
+  // Renewed while connected, so a long read never outlives its hold.
+  const holdWatched = setInterval(() => {
+    for (const page of pages.list()) {
+      if (screencast.watchers(page.pageId) > 0) pages.keep(page.pageId, config.screencast.keepMs);
+    }
+  }, Math.max(10_000, Math.floor(config.screencast.keepMs / 3)));
+  holdWatched.unref?.();
+
+  /**
    * Close tabs nobody wants any more.
    *
    * Nothing has ever closed a tab on this browser: the only cleanup is the
@@ -96,7 +123,7 @@ async function main(): Promise<void> {
     sweep.unref?.();
   }
 
-  const { app, attachWebSocket } = createApp(mcpServer, browserClient, chrome, pages);
+  const { app, attachWebSocket } = createApp(mcpServer, browserClient, chrome, pages, screencast);
   const port = config.port;
 
   const server = app.listen(port, () => {
@@ -136,6 +163,8 @@ async function main(): Promise<void> {
   // Graceful shutdown
   function shutdown(signal: string): void {
     console.log(`\nReceived ${signal}, shutting down...`);
+    clearInterval(holdWatched);
+    screencast.stopAll().catch(() => {});
     chrome.shutdown().catch(() => {});
     upstream.close().catch(() => {});
     browserClient.close().catch(() => {});

@@ -38,6 +38,17 @@ export const BrowserConfigSchema = z.object({
  */
 export const PageCollectorModeSchema = z.enum(["off", "log", "on"]);
 
+export const ScreencastConfigSchema = z.object({
+  // Capped rather than native: a retina destination would otherwise stream
+  // four times the pixels for no more legibility.
+  quality: z.number().int().min(1).max(100).default(60),
+  maxWidth: z.number().int().min(320).default(1280),
+  maxHeight: z.number().int().min(240).default(1024),
+  // A live viewer is the clearest possible sign a human is on a tab, so it
+  // holds the tab against the collector for this long, renewed while connected.
+  keepMs: z.number().int().min(10_000).default(120_000),
+});
+
 export const PagesConfigSchema = z.object({
   collector: PageCollectorModeSchema.default("off"),
   // How long a tab must sit unchanged before it is fair game.
@@ -53,11 +64,13 @@ export const AppConfigSchema = z.object({
   hostname: z.string().default("browsermcp"),
   browser: BrowserConfigSchema.default({}),
   pages: PagesConfigSchema.default({}),
+  screencast: ScreencastConfigSchema.default({}),
   vnc: VncConfigSchema.default({}),
 });
 
 export type BrowserConfig = z.infer<typeof BrowserConfigSchema>;
 export type PagesConfig = z.infer<typeof PagesConfigSchema>;
+export type ScreencastConfig = z.infer<typeof ScreencastConfigSchema>;
 export type PageCollectorMode = z.infer<typeof PageCollectorModeSchema>;
 export type VncConfig = z.infer<typeof VncConfigSchema>;
 export type AppConfig = z.infer<typeof AppConfigSchema>;

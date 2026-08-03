@@ -9,6 +9,8 @@ import { MCPServer } from "./mcp-server";
 import { BrowserClient, PageGoneError } from "./browser-client";
 import { ChromeManager } from "./chrome-manager";
 import { PageRegistry } from "./page-registry";
+import { elementBounds, ScreencastHub, type InputMessage } from "./screencast";
+import { WebSocketServer } from "ws";
 
 const startedAt = Date.now();
 
@@ -16,7 +18,8 @@ export function createApp(
   mcpServer: MCPServer,
   browserClient: BrowserClient,
   chrome: ChromeManager,
-  pages: PageRegistry
+  pages: PageRegistry,
+  screencast: ScreencastHub
 ): { app: express.Application; attachWebSocket: (server: http.Server) => void } {
   const app = express();
 
@@ -122,6 +125,36 @@ export function createApp(
     res.json({ pageId: page.pageId, keepUntil: page.keepUntil });
   });
 
+  /**
+   * Where an element is, in page coordinates.
+   *
+   * The viewer uses this to frame the captcha, or the composer, or the publish
+   * button — which beats panning a 1280x800 desktop on a phone, and is only
+   * answerable because this server drives the browser as well as showing it.
+   */
+  app.post("/api/pages/:id/frame", async (req: Request, res: Response) => {
+    try {
+      const { selector } = req.body ?? {};
+      if (!selector) {
+        res.status(400).json({ error: "selector is required" });
+        return;
+      }
+      const page = await browserClient.pageFor(req.params.id);
+      if (!page) {
+        res.status(410).json({ error: `page "${req.params.id}" is no longer open` });
+        return;
+      }
+      const box = await elementBounds(page, selector);
+      if (!box) {
+        res.status(404).json({ error: `nothing matches "${selector}" on that page` });
+        return;
+      }
+      res.json(box);
+    } catch (err) {
+      fail(res, err);
+    }
+  });
+
   app.delete("/api/pages/:id", async (req: Request, res: Response) => {
     try {
       const closed = await browserClient.closePage(req.params.id);
@@ -173,6 +206,9 @@ export function createApp(
       switch (action) {
         case "click":
           result = await browserClient.click(params.selector, params, params.pageId);
+          break;
+        case "hover":
+          result = await browserClient.hover(params.selector, params.pageId);
           break;
         case "type":
           result = await browserClient.type(params.selector, params.text, params.delay, params.pageId);
@@ -323,11 +359,76 @@ export function createApp(
   });
 
   // Attach WebSocket upgrade handler to the HTTP server
+  /**
+   * Frames out, input in, on one socket per watcher.
+   *
+   * One socket rather than a stream plus an input endpoint: input has to stay
+   * ordered, and a round trip per mouse-move would be absurd.
+   */
+  const screencastSockets = new WebSocketServer({ noServer: true });
+  const SCREENCAST_PATH = /^\/api\/pages\/([^/?]+)\/screencast/;
+
   function attachWebSocket(server: http.Server): void {
     server.on("upgrade", (req, socket, head) => {
       if (req.url?.startsWith("/vnc/websockify")) {
         (vncProxy as any).upgrade(req, socket, head);
+        return;
       }
+
+      const match = req.url ? SCREENCAST_PATH.exec(req.url) : null;
+      if (!match) return;
+      const pageId = decodeURIComponent(match[1]);
+
+      screencastSockets.handleUpgrade(req, socket, head, (ws) => {
+        /**
+         * Listen *before* the awaits below, and queue.
+         *
+         * Resolving the tab and starting the stream take a moment, and a client
+         * says its first words the instant the socket opens — the viewport it
+         * wants, the keystroke someone already typed. Registering the listener
+         * after those awaits dropped every one of them on the floor, which from
+         * the operator's side looks like a page that ignores you. Through a
+         * proxy, where "open" fires at the proxy rather than here, it was not
+         * even a race: those messages were always lost.
+         */
+        const pending: InputMessage[] = [];
+        let deliver = (message: InputMessage) => {
+          pending.push(message);
+        };
+
+        ws.on("message", (raw) => {
+          let message: InputMessage;
+          try {
+            message = JSON.parse(String(raw)) as InputMessage;
+          } catch {
+            return;
+          }
+          deliver(message);
+        });
+
+        void (async () => {
+          const page = await browserClient.pageFor(pageId).catch(() => undefined);
+          if (!page) {
+            // 410 in spirit: the tab has gone, and attaching to a different one
+            // would show the watcher somebody else's work.
+            ws.close(4410, `page "${pageId}" is no longer open`);
+            return;
+          }
+
+          await screencast.subscribe(pageId, page, ws);
+
+          const send = (message: InputMessage) => {
+            // Logged, not swallowed: input that silently fails to reach the
+            // page looks exactly like a page that ignored you.
+            void screencast.dispatch(pageId, message).catch((err) => {
+              console.warn(`screencast input (${message.type}) failed on ${pageId}:`, err);
+            });
+          };
+
+          deliver = send;
+          for (const message of pending.splice(0)) send(message);
+        })();
+      });
     });
   }
 

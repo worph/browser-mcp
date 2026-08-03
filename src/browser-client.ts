@@ -111,6 +111,14 @@ export class BrowserClient {
     return undefined;
   }
 
+  /**
+   * Public resolution by id, for callers that need the page itself — the
+   * screencast hub attaches a CDP session to it, and `/frame` measures it.
+   */
+  async pageFor(pageId: string): Promise<Page | undefined> {
+    return this.pageById(pageId);
+  }
+
   /** Open a tab of one's own, rather than sharing whatever is first. */
   async newPage(url?: string): Promise<{ pageId: string; url: string; title: string }> {
     await this.launch();
@@ -256,6 +264,20 @@ export class BrowserClient {
   async click(selector: string, options?: { button?: "left" | "right" | "middle"; clickCount?: number }, pageId?: string): Promise<{ success: true }> {
     return this.withPage(async (page) => {
       await page.click(selector, options);
+      return { success: true as const };
+    }, pageId);
+  }
+
+  /**
+   * Move the pointer onto an element.
+   *
+   * Needed on its own, not just as part of `click`: row-level controls are
+   * routinely `visibility: hidden` until their row is hovered, and Playwright
+   * will not click what it cannot see. Hover the row, then click what appeared.
+   */
+  async hover(selector: string, pageId?: string): Promise<{ success: true }> {
+    return this.withPage(async (page) => {
+      await page.hover(selector);
       return { success: true as const };
     }, pageId);
   }

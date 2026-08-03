@@ -33,6 +33,12 @@ export function loadConfig(): AppConfig {
   if (process.env.PAGE_TTL_MS) pagesOverrides.ttlMs = parseInt(process.env.PAGE_TTL_MS, 10);
   if (Object.keys(pagesOverrides).length > 0) envOverrides.pages = pagesOverrides;
 
+  const screencastOverrides: Record<string, unknown> = {};
+  if (process.env.SCREENCAST_QUALITY) screencastOverrides.quality = parseInt(process.env.SCREENCAST_QUALITY, 10);
+  if (process.env.SCREENCAST_MAX_WIDTH) screencastOverrides.maxWidth = parseInt(process.env.SCREENCAST_MAX_WIDTH, 10);
+  if (process.env.SCREENCAST_KEEP_MS) screencastOverrides.keepMs = parseInt(process.env.SCREENCAST_KEEP_MS, 10);
+  if (Object.keys(screencastOverrides).length > 0) envOverrides.screencast = screencastOverrides;
+
   const vncOverrides: Record<string, unknown> = {};
   if (process.env.VNC_RESOLUTION) vncOverrides.resolution = process.env.VNC_RESOLUTION;
   if (Object.keys(vncOverrides).length > 0) envOverrides.vnc = vncOverrides;
