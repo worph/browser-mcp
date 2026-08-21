@@ -7,7 +7,8 @@ services:
     shm_size: "2gb"
     environment:
       - VNC_RESOLUTION=1280x720x24
-      - DISCOVERY_PORT=9099
+      # Beacon MCP discovery (UDP). Off by default; set to 9099 to enable.
+      - BEACON_DISCOVERY_PORT=${BEACON_DISCOVERY_PORT:-0}
       - MCP_PORT=9746
       # Kill idle Chrome after this many ms (default 2h); respawns on next use.
       - IDLE_TTL_MS=${IDLE_TTL_MS:-7200000}

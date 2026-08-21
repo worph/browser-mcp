@@ -133,13 +133,22 @@ async function main(): Promise<void> {
     console.log(`noVNC: http://localhost:${port}/vnc/vnc_lite.html`);
 
     // Beacon discovery — advertise the upstream chrome-devtools-mcp tools.
-    createDiscoveryResponder({
-      name: "browser-mcp",
-      description: "Chrome DevTools browser automation — navigate, snapshot, click, network, performance, and more via CDP",
-      tools: mcpServer.getToolDefinitions(),
-      port: config.port,
-      listenPort: parseInt(process.env.DISCOVERY_PORT || "9099"),
-    });
+    // Off by default: a container that answers anyone's probe with its full tool
+    // surface should be something you opt into, not something you inherit. Set
+    // BEACON_DISCOVERY_PORT to a real port (9099 is the convention) to enable it;
+    // 0, unset, or any non-positive value binds no UDP socket at all.
+    const discoveryPort = parseInt(process.env.BEACON_DISCOVERY_PORT || "0", 10);
+    if (Number.isFinite(discoveryPort) && discoveryPort > 0) {
+      createDiscoveryResponder({
+        name: "browser-mcp",
+        description: "Chrome DevTools browser automation — navigate, snapshot, click, network, performance, and more via CDP",
+        tools: mcpServer.getToolDefinitions(),
+        port: config.port,
+        listenPort: discoveryPort,
+      });
+    } else {
+      console.log("Beacon discovery disabled (BEACON_DISCOVERY_PORT <= 0)");
+    }
   });
 
   // Wire WebSocket upgrade for noVNC proxy

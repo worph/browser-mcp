@@ -139,6 +139,7 @@ empty result, with no error anywhere. The wrapper now invokes what it is given i
 | `SCREENCAST_MAX_WIDTH` | `1280` | cap frame width — a retina page would otherwise stream 4x the pixels |
 | `SCREENCAST_KEEP_MS` | `120000` | how long a watched tab is held against the collector |
 | `VNC_RESOLUTION` | `1280x720x24` | Xvfb framebuffer |
+| `BEACON_DISCOVERY_PORT` | `0` (off) | UDP port the beacon discovery responder listens on. **Beacon discovery is off unless you set this**; `9099` is the convention — see below |
 
 ### Why this is not headless
 
@@ -210,6 +211,21 @@ claude mcp add --scope project --transport http browser-mcp http://localhost:974
 > ```bash
 > claude mcp add --scope user --transport http browser-mcp http://browsermcp:9746/mcp
 > ```
+
+### Beacon MCP discovery
+
+**Off by default.** Set `BEACON_DISCOVERY_PORT=9099` to enable it.
+
+When enabled, the container answers beacon discovery probes so an aggregator can find it without
+being told where it is: it binds that UDP port on `0.0.0.0`, joins multicast `239.255.99.1`, and
+replies to any `{"type":"discovery"}` datagram with its name, description, MCP port and full tool
+manifest. It is purely reactive — nothing is broadcast unprompted.
+
+Unset, `0`, or any non-positive value leaves it off: no socket is bound, no multicast group is
+joined, and the server logs `Beacon discovery disabled` at startup. Everything else — the HTTP API,
+`/mcp`, noVNC — is unaffected either way; clients configured with an explicit URL never needed
+discovery. It defaults off because answering every probe on the network with the full tool surface
+is a thing to opt into deliberately, not to inherit.
 
 ## Network
 
