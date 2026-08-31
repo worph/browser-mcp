@@ -77,6 +77,18 @@ EXPOSE 9746
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -sf -o /dev/null http://localhost:9746/api/health || exit 1
 
-VOLUME ["/data/chrome-profile"]
+# No VOLUME for /data/chrome-profile, deliberately.
+#
+# The profile is worth keeping for an interactive browser and the compose file beside this
+# Dockerfile names a volume for exactly that. Declaring it here instead did something
+# different and unwanted: it gave an *anonymous* volume to every consumer that had decided
+# not to have one. Touchstone is one — its sidecar must start cold, because a session cookie
+# surviving between audits makes an unprotected app look protected on the one check that
+# catches that — and its compose declares no volume, its store listing promises no stored
+# profile, and it had a persistent profile anyway from 2026-08-23. A profile that outlives
+# the container is also what leaves a `SingletonLock` pointing at a host that no longer
+# exists, which `clearSessionState()` exists to clean up after.
+#
+# Persistence is a decision for whoever runs the image, so it is spelled in a compose file.
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

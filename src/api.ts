@@ -54,10 +54,20 @@ export function createApp(
    * reported healthy indefinitely. The distinction that matters is between a
    * browser stopped on purpose (the idle reaper did its job, perfectly
    * healthy) and one that cannot start at all.
+   *
+   * There is a third state, and until 2026-08-31 this endpoint could not see
+   * it: a Chrome we still hold a process handle for that answers no CDP at
+   * all. One box sat in it for eight days reporting `chrome: "running"` and
+   * `healthy` while every call through the MCP surface timed out, and six
+   * conformance audits were dispatched into it on the strength of that. So the
+   * state is now confirmed against the CDP port rather than against the handle
+   * (`stateAsync()`), `wedged` is a value this can return, and — like
+   * `failing` — it answers 503, because the container healthcheck reads this
+   * endpoint and a browser nothing can drive is not healthy.
    */
-  app.get("/api/health", (_req: Request, res: Response) => {
-    const state = chrome.state();
-    const ok = state.chrome !== "failing";
+  app.get("/api/health", async (_req: Request, res: Response) => {
+    const state = await chrome.stateAsync();
+    const ok = state.chrome !== "failing" && state.chrome !== "wedged";
     res.status(ok ? 200 : 503).json({
       ok,
       node: "up",

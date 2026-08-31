@@ -149,6 +149,14 @@ when the point of the container is publishing to real sites. The display stays; 
 being the interface once screencast arrived. noVNC is now break-glass, for the things a per-tab
 stream structurally cannot show: Chrome's own UI, native dialogs, a file picker.
 
+> ⚠️ **Upgrading to 1.1.8:** the image no longer declares `VOLUME ["/data/chrome-profile"]`, so
+> a deployment that mounts nothing there now gets a **cold profile on every container
+> recreate**. That is the intended default — a consumer who never asked for persistence should
+> not silently get a browser that remembers logins, and Touchstone's audit sidecar had exactly
+> that from 2026-08-23 while its own store listing promised a cold start. If you *do* want the
+> logins kept, mount the path, as the table above has always said: a named volume or a bind, and
+> either one has always overridden the directive anyway.
+>
 > ⚠️ **Upgrading from 1.0:** the profile moved from `/tmp/chrome-profile` to
 > `/data/chrome-profile`. If you were mounting the old path, either remount it at the new one or set
 > `CHROME_USER_DATA_DIR=/tmp/chrome-profile`. Getting this wrong loses every login in the profile.

@@ -37,8 +37,28 @@ export interface ChromeManagerOptions {
   deviceScaleFactor: number;
 }
 
-/** What the health endpoint needs to tell a deliberate stop from a broken one. */
-export type ChromeState = "running" | "starting" | "idle" | "failing";
+/**
+ * What the health endpoint needs to tell a deliberate stop from a broken one.
+ *
+ * `wedged` is the state this file spent a week unable to describe: a live process handle over
+ * a CDP port that answers nothing. See `stateAsync()`.
+ */
+export type ChromeState = "running" | "starting" | "idle" | "failing" | "wedged";
+
+/**
+ * Is this `/proc/<pid>/cmdline` a Chrome *browser* process on our port and our profile?
+ *
+ * Exact argument matches rather than substrings: `--user-data-dir=/data/chrome-profile-old`
+ * is a different profile and must not be swept, and a port number is a prefix of longer ones.
+ * `--type=` marks a renderer, GPU or utility child — those are not strays, they belong to
+ * whichever browser process spawned them and die with it, so killing them individually would
+ * only make a live Chrome unstable.
+ */
+export function isOurBrowserProcess(args: readonly string[], cdpPort: number, userDataDir: string): boolean {
+  if (args.some((a) => a.startsWith("--type="))) return false;
+  if (!args.includes(`--remote-debugging-port=${cdpPort}`)) return false;
+  return args.includes(`--user-data-dir=${userDataDir}`);
+}
 
 export class ChromeManager {
   private readonly opts: ChromeManagerOptions;
@@ -63,7 +83,12 @@ export class ChromeManager {
     this.opts = opts;
   }
 
-  /** Enough for a healthcheck to tell "off on purpose" from "cannot start". */
+  /**
+   * Enough for a healthcheck to tell "off on purpose" from "cannot start".
+   *
+   * Process-handle only, and therefore not enough on its own — see `stateAsync()`, which is
+   * what the health endpoint serves.
+   */
   state(): {
     chrome: ChromeState;
     consecutiveLaunchFailures: number;
@@ -83,6 +108,28 @@ export class ChromeManager {
       lastLaunchError: this.lastLaunchError,
       lastExitCode: this.lastExitCode,
     };
+  }
+
+  /**
+   * The same answer, confirmed against CDP rather than against a process handle.
+   *
+   * `state()` asks "do I still hold a live child?", and for a week on one box the answer was
+   * yes over a Chrome that could not be driven at all: `stop()` had lost track of the real
+   * process, four of them ended up sharing one profile, and the orphan holding port 9222
+   * timed out every call. `/api/health` reported `chrome: "running"` throughout, the
+   * container reported healthy, and six audits were dispatched into it.
+   *
+   * So the health surface asks the port. `/json/version` is a plain HTTP endpoint on the CDP
+   * socket — it opens no page, drives no session and deliberately does **not** call
+   * `recordActivity()`, so polling it every ten seconds cannot keep the idle reaper from ever
+   * firing. What it proves is the only thing a caller cares about: that something is there to
+   * talk to.
+   */
+  async stateAsync(): Promise<ReturnType<ChromeManager["state"]> & { cdp: boolean | null }> {
+    const base = this.state();
+    if (base.chrome !== "running") return { ...base, cdp: null };
+    const cdp = await this.cdpReachable();
+    return cdp ? { ...base, cdp } : { ...base, chrome: "wedged", cdp };
   }
 
   get profileDir(): string {
@@ -207,8 +254,79 @@ export class ChromeManager {
     }
   }
 
+  /**
+   * Chromes on our profile and our CDP port that we are not tracking.
+   *
+   * This is the sweep that would have caught the pile-up. Every relaunch here spawns onto a
+   * fixed `--remote-debugging-port` and a fixed `--user-data-dir`, so a process we lost track
+   * of is not merely untidy: it holds the port the new one needs, and Chrome's second
+   * instance quietly gives up its own debugging socket rather than failing. The manager then
+   * tracks process B while every CDP call reaches process A, and `clearSessionState()` has
+   * meanwhile deleted the singleton files out from under A. Four of them accumulated on one
+   * box over eight days.
+   *
+   * `--type=` marks a renderer, GPU or utility child; killing those individually is both
+   * unnecessary (the browser process takes them with it) and harmful, so only the browser
+   * process itself is a stray.
+   */
+  private strayPids(): number[] {
+    const found: number[] = [];
+    let entries: string[];
+    try {
+      entries = fs.readdirSync("/proc");
+    } catch {
+      return found; // not Linux, or no procfs — the sweep is best-effort by design
+    }
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (pid === process.pid || pid === this.proc?.pid) continue;
+      let raw: string;
+      try {
+        raw = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8");
+      } catch {
+        continue; // it exited while we were looking, or it is not ours to read
+      }
+      if (!isOurBrowserProcess(raw.split("\0"), this.opts.cdpPort, this.opts.userDataDir)) continue;
+      found.push(pid);
+    }
+    return found;
+  }
+
+  /** Kill anything holding our port and profile that we are not tracking. */
+  private async killStrays(): Promise<number> {
+    const strays = this.strayPids();
+    if (strays.length === 0) return 0;
+    console.warn(`Found ${strays.length} untracked Chrome(s) on ${this.opts.userDataDir}: ${strays.join(", ")}`);
+    for (const pid of strays) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+    // SIGKILL is immediate but reaping is not, and the port stays bound until it is.
+    for (let i = 0; i < 20 && this.strayPids().length > 0; i++) await sleep(250);
+    const left = this.strayPids();
+    if (left.length > 0) console.error(`Chrome(s) ${left.join(", ")} survived SIGKILL`);
+    return strays.length;
+  }
+
   private async doStart(): Promise<void> {
     if (this.proc && this.proc.exitCode !== null) this.proc = null;
+
+    // Before anything touches the profile. `clearSessionState()` below removes the singleton
+    // files, which is safe only once we are the sole Chrome on this directory — doing it while
+    // another instance is live is precisely how two of them end up sharing one profile.
+    await this.killStrays();
+    if (await this.cdpReachable()) {
+      // Nothing we could identify, yet the port is held. Launching now would produce a Chrome
+      // whose CDP socket silently goes nowhere, and the readiness check below would pass
+      // against the squatter and call it a success — which is how a failed relaunch came to
+      // report `Chrome ready` four times running.
+      throw new Error(`CDP port ${this.opts.cdpPort} is already held by a process we do not own`);
+    }
+
     this.clearSessionState();
     this.seedProfilePrefs();
 
@@ -267,6 +385,9 @@ export class ChromeManager {
 
     console.log(`Chrome launching on ${process.env.DISPLAY || ":99"} (CDP ${this.cdpUrl()})`);
 
+    // `doStart()` proved the port was free before spawning, so a socket answering now is
+    // ours. Without that guarantee this check passes against whoever already held the port,
+    // and reports a launch that never happened as a success.
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       if (await this.cdpReachable()) {
@@ -281,18 +402,51 @@ export class ChromeManager {
     throw new Error(`Chrome did not expose CDP at ${this.cdpUrl()} within 30s`);
   }
 
-  /** Kill Chrome. Safe to call when already stopped. */
+  /**
+   * Kill Chrome, and do not return until it is actually dead. Safe to call when stopped.
+   *
+   * Both halves of that sentence are load-bearing, and neither used to hold. The old version
+   * nulled `this.proc` first and sent SIGKILL last **without waiting for it**, so `stop()`
+   * resolved while Chrome was still alive and `isRunning()` already said it was not. The next
+   * `ensureRunning()` then cleared the profile's singleton files under a live process and
+   * spawned a second Chrome onto the same port and the same `--user-data-dir`. Repeat every
+   * two hours and you get four of them, a CDP socket owned by the oldest, and every call
+   * timing out on `Network.enable` while the health endpoint reports `running`.
+   *
+   * So: wait on the `exit` event rather than polling `exitCode` (which Node only sets once it
+   * has reaped the child), and if the process survives both signals, **keep the handle**. A
+   * browser we cannot kill is one we must not relaunch over; holding the handle makes
+   * `stateAsync()` report `wedged`, the container go unhealthy, and Touchstone record the
+   * sections that need a browser as blocked — all of which are true, and none of which
+   * silently corrupt the profile.
+   */
   async stop(): Promise<void> {
     this.intentionalStop = true;
     const proc = this.proc;
-    this.proc = null;
-    if (proc && proc.exitCode === null) {
-      // Prefer a clean SIGTERM exit (no "crashed" profile → no tab restore);
-      // escalate to SIGKILL only if it lingers.
-      proc.kill("SIGTERM");
-      for (let i = 0; i < 6 && proc.exitCode === null; i++) await sleep(500);
-      if (proc.exitCode === null) proc.kill("SIGKILL");
+    if (!proc) return;
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      this.proc = null;
+      return;
     }
+
+    const exited = new Promise<boolean>((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) return resolve(true);
+      proc.once("exit", () => resolve(true));
+    });
+    const within = async (ms: number): Promise<boolean> =>
+      Promise.race([exited, sleep(ms).then(() => false)]);
+
+    // Prefer a clean SIGTERM exit (no "crashed" profile → no tab restore); escalate only if
+    // it lingers.
+    proc.kill("SIGTERM");
+    if (!(await within(3000))) {
+      proc.kill("SIGKILL");
+      if (!(await within(5000))) {
+        console.error(`Chrome (pid ${proc.pid}) survived SIGKILL; keeping the handle rather than relaunching over it`);
+        return;
+      }
+    }
+    this.proc = null;
   }
 
   /**
